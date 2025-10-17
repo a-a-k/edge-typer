@@ -1,0 +1,110 @@
+name: reproduce
+
+on:
+  workflow_dispatch:
+    inputs:
+      demo_ref:
+        description: "Git ref in open-telemetry/opentelemetry-demo (tag, branch, or commit SHA)"
+        required: false
+        default: "main"
+      soak_seconds:
+        description: "How long to soak (seconds) after services are healthy"
+        required: false
+        default: "180"
+
+jobs:
+  capture-traces:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python (for later analysis steps)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      # setup-python is the recommended way to ensure consistent Python across runners.
+
+      - name: Check Docker & Compose availability
+        run: |
+          docker --version
+          docker compose version
+      # The OTel Demo requires Docker and Compose v2+.
+
+      - name: Prepare run dir
+        run: |
+          echo "RUN_DIR=${{ github.workspace }}/runs/${{ github.run_id }}" >> $GITHUB_ENV
+          mkdir -p "${{ github.workspace }}/runs/${{ github.run_id }}/collector"
+
+      - name: Clone OpenTelemetry Demo at requested ref
+        env:
+          DEMO_REF: ${{ inputs.demo_ref }}
+        run: |
+          mkdir -p vendor
+          git init vendor/opentelemetry-demo
+          cd vendor/opentelemetry-demo
+          git remote add origin https://github.com/open-telemetry/opentelemetry-demo.git
+          # fetch exactly the requested ref (branch, tag or SHA)
+          git fetch --depth 1 origin "${DEMO_REF}"
+          git checkout --detach FETCH_HEAD
+          git rev-parse --short HEAD
+
+      - name: Create Collector "extras" config (adds file exporter)
+        run: |
+          cat > vendor/opentelemetry-demo/src/otel-collector/otelcol-config-extras.yml <<'YAML'
+          exporters:
+            file/edgetyper:
+              path: /data/otel-traces.json
+              # Keep config minimal; OTLP-JSON is implied by the file exporter spec.
+          service:
+            pipelines:
+              traces:
+                # IMPORTANT: arrays are replaced; keep spanmetrics as required by demo docs.
+                exporters: [spanmetrics, file/edgetyper]
+          YAML
+
+      - name: Mount a writable /data for the Collector (Compose override)
+        run: |
+          cat > vendor/opentelemetry-demo/docker-compose.override.yml <<'YAML'
+          services:
+            otelcol:
+              volumes:
+                - ${RUN_DIR}/collector:/data
+          YAML
+      # The demo’s Compose service for the collector is commonly named "otelcol".
+
+      - name: Bring up the OTel Demo (detached)
+        working-directory: vendor/opentelemetry-demo
+        run: |
+          docker compose up --force-recreate --remove-orphans --detach
+      # Official docs show docker compose up as the standard path.
+
+      - name: Wait for load generator, then soak
+        env:
+          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+        run: |
+          # The demo includes a Locust-based load generator that starts automatically.
+          echo "Waiting up to 3 minutes for containers to report healthy..."
+          for i in {1..36}; do
+            unhealthy=$(docker ps --format '{{.Names}} {{.Status}}' | grep -E 'unhealthy|restarting' || true)
+            if [ -z "$unhealthy" ]; then break; fi
+            sleep 5
+          done
+          echo "Soaking for ${SOAK_SECONDS}s to accumulate traces..."
+          sleep "${SOAK_SECONDS}"
+
+      - name: Tear down the demo
+        working-directory: vendor/opentelemetry-demo
+        run: |
+          docker compose down -v
+
+      - name: Show captured file size
+        run: |
+          ls -lh "${RUN_DIR}/collector" || true
+
+      - name: Upload captured traces (OTLP-JSON)
+        uses: actions/upload-artifact@v4
+        with:
+          name: otlp-json-traces
+          path: runs/${{ github.run_id }}/collector/otel-traces.json
