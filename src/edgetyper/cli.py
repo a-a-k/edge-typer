@@ -10,7 +10,7 @@ import click
 import pandas as pd
 
 from edgetyper.io.otlp_json import read_otlp_json
-
+from edgetyper.graph.build import build as build_graph
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
 def main() -> None:
@@ -69,6 +69,25 @@ def extract_cmd(input_path: Path, out_path: Path, service_attr: str, min_spans: 
     size_mb = out_path.stat().st_size / (1024 * 1024)
     click.echo(f"[extract] wrote {len(df)} spans → {out_path} ({size_mb:.2f} MiB)")
 
+@main.command("graph")
+@click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
+              help="Input Parquet with normalized spans (from 'extract').")
+@click.option("--out-events", "out_events", type=click.Path(dir_okay=False, path_type=Path), required=True,
+              help="Output Parquet with per-interaction events.")
+@click.option("--out-edges", "out_edges", type=click.Path(dir_okay=False, path_type=Path), required=True,
+              help="Output Parquet with aggregated service→service edges.")
+def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path) -> None:
+    """Construct RPC and messaging interactions and aggregate to service→service edges."""
+    spans = pd.read_parquet(spans_path)
+    results = build_graph(spans)
+    out_events.parent.mkdir(parents=True, exist_ok=True)
+    out_edges.parent.mkdir(parents=True, exist_ok=True)
+    results.events.to_parquet(out_events, index=False)
+    results.edges.to_parquet(out_edges, index=False)
+    click.echo(
+        f"[graph] events={len(results.events)} edges={len(results.edges)} "
+        f"→ {out_events.name}, {out_edges.name}"
+    )
 
 if __name__ == "__main__":
     main()
