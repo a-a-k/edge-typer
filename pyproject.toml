@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "edgetyper"
+version = "0.1.0"
+description = "Trace-driven classification of synchronous vs. asynchronous service edges (OTel Demo)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+dependencies = [
+  "pandas>=2.2,<3",
+  "pyarrow>=15,<20",
+  "numpy>=1.26,<3",
+  "networkx>=3.2,<4",
+  "click>=8.1,<9",
+  "scikit-learn>=1.4,<2",
+  "matplotlib>=3.8,<4",
+  "orjson>=3.9,<4",
+  "pyyaml>=6,<7"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.6,<1"
+]
+
+[project.scripts]
+edgetyper = "edgetyper.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
