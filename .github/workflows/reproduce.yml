@@ -4,38 +4,49 @@ on:
   workflow_dispatch:
     inputs:
       demo_ref:
-        description: "Git ref in open-telemetry/opentelemetry-demo (tag, branch, or commit SHA)"
+        description: "Git ref in open-telemetry/opentelemetry-demo (tag/branch/SHA)"
         required: false
         default: "main"
       soak_seconds:
-        description: "How long to soak (seconds) after services are healthy"
+        description: "How long to soak (seconds) after health"
         required: false
         default: "180"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
 
 jobs:
-  capture-traces:
+  capture_and_analyze:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+
     steps:
       - name: Checkout this repo
         uses: actions/checkout@v4
 
-      - name: Set up Python (for later analysis steps)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # setup-python is the recommended way to ensure consistent Python across runners.
 
-      - name: Check Docker & Compose availability
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Check Docker & Compose
         run: |
           docker --version
           docker compose version
-      # The OTel Demo requires Docker and Compose v2+.
 
       - name: Prepare run dir
         run: |
           echo "RUN_DIR=${{ github.workspace }}/runs/${{ github.run_id }}" >> $GITHUB_ENV
-          mkdir -p "${{ github.workspace }}/runs/${{ github.run_id }}/collector"
+          mkdir -p "${{ github.workspace }}/runs/${{ github.run_id }}/collector" site
 
       - name: Clone OpenTelemetry Demo at requested ref
         env:
@@ -45,26 +56,24 @@ jobs:
           git init vendor/opentelemetry-demo
           cd vendor/opentelemetry-demo
           git remote add origin https://github.com/open-telemetry/opentelemetry-demo.git
-          # fetch exactly the requested ref (branch, tag or SHA)
           git fetch --depth 1 origin "${DEMO_REF}"
           git checkout --detach FETCH_HEAD
           git rev-parse --short HEAD
 
-      - name: Create Collector "extras" config (adds file exporter)
+      - name: Add Collector "extras" (file exporter → OTLP-JSON)
         run: |
           cat > vendor/opentelemetry-demo/src/otel-collector/otelcol-config-extras.yml <<'YAML'
           exporters:
             file/edgetyper:
               path: /data/otel-traces.json
-              # Keep config minimal; OTLP-JSON is implied by the file exporter spec.
           service:
             pipelines:
               traces:
-                # IMPORTANT: arrays are replaced; keep spanmetrics as required by demo docs.
+                # Arrays are replaced on merge; keep spanmetrics required by the demo.
                 exporters: [spanmetrics, file/edgetyper]
           YAML
 
-      - name: Mount a writable /data for the Collector (Compose override)
+      - name: Compose override to mount /data into the collector
         run: |
           cat > vendor/opentelemetry-demo/docker-compose.override.yml <<'YAML'
           services:
@@ -72,26 +81,23 @@ jobs:
               volumes:
                 - ${RUN_DIR}/collector:/data
           YAML
-      # The demo’s Compose service for the collector is commonly named "otelcol".
 
-      - name: Bring up the OTel Demo (detached)
+      - name: Bring up OTel Demo (detached)
         working-directory: vendor/opentelemetry-demo
         run: |
           docker compose up --force-recreate --remove-orphans --detach
-      # Official docs show docker compose up as the standard path.
 
-      - name: Wait for load generator, then soak
+      - name: Wait for health & soak traffic
         env:
           SOAK_SECONDS: ${{ inputs.soak_seconds }}
         run: |
-          # The demo includes a Locust-based load generator that starts automatically.
-          echo "Waiting up to 3 minutes for containers to report healthy..."
+          echo "Waiting up to 3 minutes for unhealthy/restarting to clear…"
           for i in {1..36}; do
-            unhealthy=$(docker ps --format '{{.Names}} {{.Status}}' | grep -E 'unhealthy|restarting' || true)
-            if [ -z "$unhealthy" ]; then break; fi
+            bad=$(docker ps --format '{{.Names}} {{.Status}}' | grep -E 'unhealthy|restarting' || true)
+            if [ -z "$bad" ]; then break; fi
             sleep 5
           done
-          echo "Soaking for ${SOAK_SECONDS}s to accumulate traces..."
+          echo "Soaking for ${SOAK_SECONDS}s (Locust load generator drives traffic)…"
           sleep "${SOAK_SECONDS}"
 
       - name: Tear down the demo
@@ -99,12 +105,45 @@ jobs:
         run: |
           docker compose down -v
 
-      - name: Show captured file size
+      - name: Show captured trace file
         run: |
           ls -lh "${RUN_DIR}/collector" || true
 
-      - name: Upload captured traces (OTLP-JSON)
+      - name: Extract → Graph → Featurize
+        run: |
+          edgetyper extract   --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          edgetyper graph     --spans "${RUN_DIR}/spans.parquet" --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features.parquet"
+
+      - name: Baselines + Our labels
+        run: |
+          edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
+          edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
+          edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+
+      - name: Evaluate (vs regex ground truth) + Report
+        run: |
+          edgetyper eval   --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.csv" --out "${RUN_DIR}/metrics_ours.json"
+          edgetyper eval   --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.csv" --out "${RUN_DIR}/metrics_semconv.json"
+          edgetyper eval   --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.csv" --out "${RUN_DIR}/metrics_timing.json"
+          edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
+
+      - name: Upload results bundle (traces + outputs)
         uses: actions/upload-artifact@v4
         with:
-          name: otlp-json-traces
-          path: runs/${{ github.run_id }}/collector/otel-traces.json
+          name: edgetyper-results
+          path: |
+            runs/${{ github.run_id }}/
+            site/
+
+  deploy-pages:
+    needs: capture_and_analyze
+    runs-on: ubuntu-latest
+    steps:
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
