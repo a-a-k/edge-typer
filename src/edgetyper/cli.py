@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 import click
 import pandas as pd
+import re
+import yaml 
 
 from edgetyper.io.otlp_json import read_otlp_json
 from edgetyper.graph.build import build as build_graph
@@ -145,31 +147,63 @@ def label_cmd(features_path: Path, out_path: Path) -> None:
 
 
 # ---------------- eval ----------------
-def _load_ground_truth_patterns(gt_path: Path) -> pd.DataFrame:
-    gt = pd.read_csv(gt_path)
-    required = {"src_pattern", "dst_pattern", "label"}
-    missing = required - set(gt.columns)
-    if missing:
-        raise ValueError(f"ground_truth.csv missing columns: {sorted(missing)}")
-    return gt
+def _normalize_service_name(name: str) -> str:
+    # Case-insensitive, strip non-alnum, drop trailing "-service" or "service"
+    s = re.sub(r"[^a-z0-9]", "", name.lower())
+    s = re.sub(r"(?:service)$", "", s)  # drop suffix
+    return s
 
+def _load_ground_truth(gt_path: Path) -> pd.DataFrame:
+    """
+    Supports:
+      - YAML: {links: [{source, target, type: ASYNC|BLOCKING}, ...]}
+      - CSV:  src_pattern,dst_pattern,label  (backward compat)
+    Returns a dataframe with columns: src_norm, dst_norm, gt_label
+    """
+    if gt_path.suffix.lower() in {".yaml", ".yml"}:
+        data = yaml.safe_load(gt_path.read_text())
+        links = data.get("links", [])
+        rows = []
+        for link in links:
+            src = str(link.get("source", "")).strip()
+            dst = str(link.get("target", "")).strip()
+            typ = str(link.get("type", "")).strip().upper()
+            if not src or not dst or typ not in {"ASYNC", "BLOCKING"}:
+                continue
+            rows.append({
+                "src_norm": _normalize_service_name(src),
+                "dst_norm": _normalize_service_name(dst),
+                "gt_label": "async" if typ == "ASYNC" else "sync",
+            })
+        return pd.DataFrame(rows)
+    else:
+        # Legacy CSV with regex patterns → keep behavior
+        gt = pd.read_csv(gt_path)
+        required = {"src_pattern", "dst_pattern", "label"}
+        missing = required - set(gt.columns)
+        if missing:
+            raise click.ClickException(f"ground truth CSV missing columns: {sorted(missing)}")
+        # Compile regex once
+        gt["src_re"] = gt["src_pattern"].apply(lambda p: re.compile(p, re.IGNORECASE))
+        gt["dst_re"] = gt["dst_pattern"].apply(lambda p: re.compile(p, re.IGNORECASE))
+        return gt  # handled by matcher below
 
-def _match_patterns(edges_df: pd.DataFrame, gt_df: pd.DataFrame) -> pd.DataFrame:
-    import re
-
-    rows = []
-    for _, e in edges_df.iterrows():
-        src = str(e["src_service"])
-        dst = str(e["dst_service"])
-        matched_label = None
-        for _, g in gt_df.iterrows():
-            if re.search(g["src_pattern"], src) and re.search(g["dst_pattern"], dst):
-                matched_label = g["label"]
-                break
-        if matched_label:
-            rows.append({"src_service": src, "dst_service": dst, "gt_label": matched_label})
-    return pd.DataFrame(rows)
-
+def _match_ground_truth(edges_df: pd.DataFrame, gt_df: pd.DataFrame, is_yaml: bool) -> pd.DataFrame:
+    if is_yaml:
+        # Normalize discovered edges and join on normalized names
+        e = edges_df.copy()
+        e["src_norm"] = e["src_service"].astype(str).map(_normalize_service_name)
+        e["dst_norm"] = e["dst_service"].astype(str).map(_normalize_service_name)
+        return e.merge(gt_df, on=["src_norm", "dst_norm"], how="inner")[["src_service","dst_service","gt_label"]]
+    else:
+        # Regex CSV mode
+        rows = []
+        for _, e in edges_df[["src_service","dst_service"]].drop_duplicates().iterrows():
+            for _, g in gt_df.iterrows():
+                if g["src_re"].search(str(e["src_service"])) and g["dst_re"].search(str(e["dst_service"])):
+                    rows.append({"src_service": e["src_service"], "dst_service": e["dst_service"], "gt_label": g["label"]})
+                    break
+        return pd.DataFrame(rows)
 
 @main.command("eval")
 @click.option("--pred", "pred_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
@@ -179,13 +213,15 @@ def _match_patterns(edges_df: pd.DataFrame, gt_df: pd.DataFrame) -> pd.DataFrame
 def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path) -> None:
     pred = pd.read_csv(pred_path)
     feats = pd.read_parquet(features_path)
-    gt_pat = _load_ground_truth_patterns(gt_path)
-    gt_pairs = _match_patterns(feats[["src_service", "dst_service"]].drop_duplicates(), gt_pat)
+    gt_df = _load_ground_truth(gt_path)
+    is_yaml = gt_path.suffix.lower() in {".yaml", ".yml"}
 
-    merged = gt_pairs.merge(pred, on=["src_service", "dst_service"], how="left")
-    merged = merged.dropna(subset=["pred_label"])
+    gt_pairs = _match_ground_truth(
+        feats[["src_service","dst_service"]].drop_duplicates(), gt_df, is_yaml=is_yaml
+    )
+    merged = gt_pairs.merge(pred, on=["src_service","dst_service"], how="left").dropna(subset=["pred_label"])
     if merged.empty:
-        raise click.ClickException("No edges matched ground truth patterns; check naming and patterns.")
+        raise click.ClickException("No edges matched ground truth; check service names/tag and YAML.")
 
     # Metrics
     y_true = merged["gt_label"].astype(str)
