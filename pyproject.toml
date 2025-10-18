@@ -39,6 +39,10 @@ target-version = "py311"
 packages = ["src/edgetyper"]     # required for a src/ layout
 only-packages = true             # optional: exclude non-package files from the wheel
 
+# Make editable installs unambiguous (ensures 'src' is on sys.path)
+[tool.hatch.build]
+dev-mode-dirs = ["src"]
+
 [tool.hatch.build.targets.sdist]
 include = ["src/edgetyper", "README.md", "LICENSE", "pyproject.toml"]
 
