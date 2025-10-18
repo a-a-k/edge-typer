@@ -34,3 +34,11 @@ edgetyper = "edgetyper.cli:main"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/edgetyper"]     # required for a src/ layout
+only-packages = true             # optional: exclude non-package files from the wheel
+
+[tool.hatch.build.targets.sdist]
+include = ["src/edgetyper", "README.md", "LICENSE", "pyproject.toml"]
+
