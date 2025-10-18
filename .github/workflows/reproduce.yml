@@ -160,6 +160,16 @@ jobs:
           edgetyper graph     --spans "${RUN_DIR}/spans.parquet" --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features.parquet"
 
+      - name: Inspect feature columns
+        run: |
+          python - <<'PY'
+          import pandas as pd, os
+          fp = os.environ["RUN_DIR"] + "/features.parquet"
+          df = pd.read_parquet(fp)
+          print("features columns:", list(df.columns))
+          print("rows:", len(df))
+          PY
+
       - name: Baselines + Our labels
         run: |
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
