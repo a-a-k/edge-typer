@@ -22,11 +22,10 @@ edges_df: one row per service→service pair with aggregates:
 Notes
 -----
 - RPC pairing follows the common pattern where the SERVER span's parentSpanId equals the CLIENT span's spanId
-  within the same trace. (Cross-process propagation sets the server's parent to the client span.) 
+  within the same trace.
 - Messaging pairing groups by messaging destination (topic/queue) and greedily matches a PRODUCER with the
-  earliest CONSUMER whose start >= producer end (approximate causality for queued async work).
-- This module *does not* attempt to handle batching or fan-out beyond 1:1 greedy pairing; the features stage
-  will use aggregate rates (e.g., fan-out) computed from the events.
+  earliest CONSUMER whose start >= producer end (approximate queued causality).
+- Optional broker edges: emit producer→<broker> and <broker>→consumer in addition to collapsed producer→consumer.
 """
 from __future__ import annotations
 
@@ -49,7 +48,12 @@ def _safe_int(x):
         return None
 
 
-def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service_name: str = "kafka") -> EventsAndEdges:
+def build(
+    spans: pd.DataFrame,
+    *,
+    emit_broker_edges: bool = True,
+    broker_service_name: str = "kafka",
+) -> EventsAndEdges:
     # ---- Guard rails ----
     required_cols = {
         "trace_id", "span_id", "parent_span_id", "service_name", "span_kind",
@@ -60,7 +64,7 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
     if missing:
         raise ValueError(f"spans df missing columns: {missing}")
 
-    # Normalize times to ints (ns); some exporters may have strings
+    # Normalize times
     for col in ("start_ns", "end_ns"):
         spans[col] = spans[col].map(_safe_int)
 
@@ -137,12 +141,10 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
             p_end = prod_grp.iloc[i]["up_end_ns"]
             c_start = cons_grp.iloc[j]["down_start_ns"]
             if p_end is None or c_start is None:
-                # Move forward conservatively
                 i += 1
                 j += 1
                 continue
             if c_start >= p_end:
-                # Found a plausible consumer after producer → record event
                 row = {
                     "src_service": prod_grp.iloc[i]["src_service"],
                     "dst_service": cons_grp.iloc[j]["dst_service"],
@@ -159,7 +161,6 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
                 i += 1
                 j += 1
             else:
-                # Consumer starts before this producer ended → advance consumer pointer
                 j += 1
 
     msg_events_df = pd.DataFrame(msg_events, columns=[
@@ -167,10 +168,10 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
         "up_start_ns", "up_end_ns", "down_start_ns", "down_end_ns",
         "messaging_destination", "has_links_up", "has_links_down",
     ])
-  
+
+    # ---- Optional broker edges: producer→broker and broker→consumer ----
     extra = []
     if emit_broker_edges:
-        # Produce producer→kafka
         if not producers.empty:
             for _, p in producers.iterrows():
                 extra.append({
@@ -179,22 +180,19 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
                     "kind": "messaging",
                     "up_start_ns": p["up_start_ns"],
                     "up_end_ns": p["up_end_ns"],
-                    # set downstream start=end to avoid NaNs in timing features
-                    "down_start_ns": p["up_end_ns"],
+                    "down_start_ns": p["up_end_ns"],   # align timestamps to avoid NaN
                     "down_end_ns": p["up_end_ns"],
                     "messaging_destination": p["messaging_destination"],
                     "has_links_up": p["has_links_up"],
                     "has_links_down": False,
                 })
-        # Consume kafka→consumer
         if not consumers.empty:
             for _, c in consumers.iterrows():
                 extra.append({
                     "src_service": broker_service_name,
                     "dst_service": c["dst_service"],
                     "kind": "messaging",
-                    # set upstream end=start to avoid NaNs
-                    "up_start_ns": c["down_start_ns"],
+                    "up_start_ns": c["down_start_ns"],  # align timestamps
                     "up_end_ns": c["down_start_ns"],
                     "down_start_ns": c["down_start_ns"],
                     "down_end_ns": c["down_end_ns"],
@@ -202,7 +200,6 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
                     "has_links_up": False,
                     "has_links_down": c["has_links_down"],
                 })
-
     broker_events_df = pd.DataFrame(extra, columns=[
         "src_service","dst_service","kind","up_start_ns","up_end_ns","down_start_ns","down_end_ns",
         "messaging_destination","has_links_up","has_links_down",
@@ -210,16 +207,12 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
 
     # ---- Concatenate events, then aggregate to edges ----
     parts = [df for df in (rpc_events, msg_events_df, broker_events_df) if not df.empty]
-    events_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=[...])
-
-    # ---- Concatenate events, then aggregate to edges ----
-    events_df = pd.concat([rpc_events, msg_events_df], ignore_index=True) if not rpc_events.empty else msg_events_df
-    if events_df.empty:
-        # Return empty frames with expected columns
+    if parts:
+        events_df = pd.concat(parts, ignore_index=True)
+    else:
         events_df = pd.DataFrame(columns=[
-            "src_service", "dst_service", "kind",
-            "up_start_ns", "up_end_ns", "down_start_ns", "down_end_ns",
-            "messaging_destination", "has_links_up", "has_links_down",
+            "src_service","dst_service","kind","up_start_ns","up_end_ns","down_start_ns","down_end_ns",
+            "messaging_destination","has_links_up","has_links_down",
         ])
 
     # Aggregate to edges
@@ -233,7 +226,6 @@ def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service
         n_messaging=("kind", lambda s: int((s == "messaging").sum())),
         n_with_links=("has_links_up", _sum_bool),
     )
-    # Add link info from downstream side too
     edges_df["n_with_links"] += grp["has_links_down"].agg(_sum_bool)["has_links_down"].values
 
     return EventsAndEdges(events=events_df, edges=edges_df)
