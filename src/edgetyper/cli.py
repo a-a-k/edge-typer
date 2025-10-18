@@ -75,11 +75,24 @@ def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path, with_broker_e
 def featurize_cmd(events_path: Path, edges_path: Path, out_path: Path) -> None:
     events = pd.read_parquet(events_path)
     edges = pd.read_parquet(edges_path)
+
     f_sem = features_semconv(events, edges)
     f_tim = features_timing(events)
-    feats = f_sem.merge(f_tim, on=["src_service", "dst_service"], how="left").fillna(
-        {"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0}
-    )
+
+    feats = f_sem.merge(f_tim, on=["src_service", "dst_service"], how="left")
+
+    # ---- Guarantee timing features exist (esp. p_nonneg_lag) ----
+    if "median_lag_ns" not in feats.columns:
+        feats["median_lag_ns"] = 0
+    if "p_overlap" not in feats.columns:
+        feats["p_overlap"] = 0.0
+    if "p_nonneg_lag" not in feats.columns:
+        # Conservative fallback: treat non-negative lag as present when median lag >= 0
+        feats["p_nonneg_lag"] = (feats["median_lag_ns"] >= 0).astype(float)
+
+    # Fill any remaining NaNs from join
+    feats = feats.fillna({"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0})
+
     out_path.parent.mkdir(parents=True, exist_ok=True)
     feats.to_parquet(out_path, index=False)
     click.echo(f"[featurize] wrote {len(feats)} edges → {out_path}")
