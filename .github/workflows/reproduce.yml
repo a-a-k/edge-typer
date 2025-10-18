@@ -114,16 +114,27 @@ jobs:
 
       - name: Wait for health & soak traffic
         env:
-          SOAK_SECONDS: ${{ inputs.soak_seconds }}
+          # Use workflow inputs when present (manual runs), else default to 180s on pushes.
+          SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '180' }}
         run: |
+          set -euo pipefail
           echo "Waiting up to 3 minutes for unhealthy/restarting to clear…"
           for i in {1..36}; do
             bad=$(docker ps --format '{{.Names}} {{.Status}}' | grep -E 'unhealthy|restarting' || true)
             if [ -z "$bad" ]; then break; fi
             sleep 5
           done
+          # Final default-in-shell in case env var was set to an empty string
+          : "${SOAK_SECONDS:=180}"
           echo "Soaking for ${SOAK_SECONDS}s (Locust load generator drives traffic)…"
           sleep "${SOAK_SECONDS}"
+
+      - name: Check that traces file exists
+        run: |
+          if [ ! -s "${RUN_DIR}/collector/otel-traces.json" ]; then
+            echo "No traces captured. Increase soak time or check Collector extras merge."
+            exit 2
+          fi
 
       - name: Tear down the demo
         working-directory: vendor/opentelemetry-demo
