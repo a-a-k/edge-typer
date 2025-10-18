@@ -49,7 +49,7 @@ def _safe_int(x):
         return None
 
 
-def build(spans: pd.DataFrame) -> EventsAndEdges:
+def build(spans: pd.DataFrame, *, emit_broker_edges: bool = True, broker_service_name: str = "kafka") -> EventsAndEdges:
     # ---- Guard rails ----
     required_cols = {
         "trace_id", "span_id", "parent_span_id", "service_name", "span_kind",
@@ -167,6 +167,50 @@ def build(spans: pd.DataFrame) -> EventsAndEdges:
         "up_start_ns", "up_end_ns", "down_start_ns", "down_end_ns",
         "messaging_destination", "has_links_up", "has_links_down",
     ])
+  
+    extra = []
+    if emit_broker_edges:
+        # Produce producer→kafka
+        if not producers.empty:
+            for _, p in producers.iterrows():
+                extra.append({
+                    "src_service": p["src_service"],
+                    "dst_service": broker_service_name,
+                    "kind": "messaging",
+                    "up_start_ns": p["up_start_ns"],
+                    "up_end_ns": p["up_end_ns"],
+                    # set downstream start=end to avoid NaNs in timing features
+                    "down_start_ns": p["up_end_ns"],
+                    "down_end_ns": p["up_end_ns"],
+                    "messaging_destination": p["messaging_destination"],
+                    "has_links_up": p["has_links_up"],
+                    "has_links_down": False,
+                })
+        # Consume kafka→consumer
+        if not consumers.empty:
+            for _, c in consumers.iterrows():
+                extra.append({
+                    "src_service": broker_service_name,
+                    "dst_service": c["dst_service"],
+                    "kind": "messaging",
+                    # set upstream end=start to avoid NaNs
+                    "up_start_ns": c["down_start_ns"],
+                    "up_end_ns": c["down_start_ns"],
+                    "down_start_ns": c["down_start_ns"],
+                    "down_end_ns": c["down_end_ns"],
+                    "messaging_destination": c["messaging_destination"],
+                    "has_links_up": False,
+                    "has_links_down": c["has_links_down"],
+                })
+
+    broker_events_df = pd.DataFrame(extra, columns=[
+        "src_service","dst_service","kind","up_start_ns","up_end_ns","down_start_ns","down_end_ns",
+        "messaging_destination","has_links_up","has_links_down",
+    ])
+
+    # ---- Concatenate events, then aggregate to edges ----
+    parts = [df for df in (rpc_events, msg_events_df, broker_events_df) if not df.empty]
+    events_df = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=[...])
 
     # ---- Concatenate events, then aggregate to edges ----
     events_df = pd.concat([rpc_events, msg_events_df], ignore_index=True) if not rpc_events.empty else msg_events_df
