@@ -32,11 +32,22 @@ def baseline_timing(feat_timing: pd.DataFrame) -> pd.DataFrame:
 
 
 def rule_labels(feat_semconv: pd.DataFrame, feat_timing: pd.DataFrame) -> pd.DataFrame:
-    df = feat_semconv.merge(
-        feat_timing[["src_service", "dst_service", "median_lag_ns", "p_overlap", "p_nonneg_lag"]],
-        on=["src_service", "dst_service"],
-        how="left",
-    ).fillna({"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0})
+    # Select whatever timing cols exist; fill the rest later
+    base_cols = ["src_service", "dst_service"]
+    have = [c for c in ["median_lag_ns", "p_overlap", "p_nonneg_lag"] if c in feat_timing.columns]
+    right = feat_timing[base_cols + have].copy()
+
+    df = feat_semconv.merge(right, on=["src_service", "dst_service"], how="left")
+
+    # Ensure required columns exist
+    if "median_lag_ns" not in df.columns:
+        df["median_lag_ns"] = 0
+    if "p_overlap" not in df.columns:
+        df["p_overlap"] = 0.0
+    if "p_nonneg_lag" not in df.columns:
+        df["p_nonneg_lag"] = (df["median_lag_ns"] >= 0).astype(float)
+
+    df = df.fillna({"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0})
 
     def label_row(r):
         # High-confidence async
@@ -58,3 +69,4 @@ def rule_labels(feat_semconv: pd.DataFrame, feat_timing: pd.DataFrame) -> pd.Dat
             "p_messaging", "link_ratio", "median_lag_ns", "p_overlap", "p_nonneg_lag",
         ]
     ]
+
