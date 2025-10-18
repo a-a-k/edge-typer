@@ -1,0 +1,96 @@
+# Ground Truth model for the OpenTelemetry Demo architecture.
+# This model is formalized by analyzing the source code and communication patterns (best-effort).
+
+links:
+  # Frontend synchronous calls (typical gRPC/HTTP)
+  - source: frontend
+    target: adservice
+    type: BLOCKING # gRPC
+  - source: frontend
+    target: productcatalogservice
+    type: BLOCKING # gRPC
+  - source: frontend
+    target: recommendationservice
+    type: BLOCKING # gRPC
+  - source: frontend
+    target: cartservice
+    type: BLOCKING # gRPC
+  - source: frontend
+    target: checkoutservice
+    type: BLOCKING # gRPC
+
+  # Checkout orchestrates calls to multiple backends
+  - source: checkoutservice
+    target: cartservice
+    type: BLOCKING # gRPC
+  - source: checkoutservice
+    target: productcatalogservice
+    type: BLOCKING # gRPC
+  - source: checkoutservice
+    target: currencyservice
+    type: BLOCKING # gRPC
+  - source: checkoutservice
+    target: paymentservice
+    type: BLOCKING # HTTP/gRPC
+  - source: checkoutservice
+    target: shippingservice
+    type: BLOCKING # gRPC
+  - source: checkoutservice
+    target: emailservice
+    type: BLOCKING # HTTP
+
+  # Recommendation depends on catalog
+  - source: recommendationservice
+    target: productcatalogservice
+    type: BLOCKING # gRPC
+
+  # Storage backends
+  - source: cartservice
+    target: redis
+    type: BLOCKING # Redis
+  - source: productcatalogservice
+    target: postgres
+    type: BLOCKING # PostgreSQL
+
+  # Async processing via Kafka (producers and consumers)
+  - source: checkoutservice
+    target: kafka
+    type: ASYNC # Kafka Producer: orders
+  - source: kafka
+    target: orderprocessingservice
+    type: ASYNC # Kafka Consumer: orders
+  - source: kafka
+    target: frauddetectionservice
+    type: ASYNC # Kafka Consumer: orders
+
+  - source: orderprocessingservice
+    target: kafka
+    type: ASYNC # Kafka Producer: shipments
+  - source: kafka
+    target: shippingservice
+    type: ASYNC # Kafka Consumer: shipments
+
+  - source: paymentservice
+    target: kafka
+    type: ASYNC # Kafka Producer: payments
+  - source: kafka
+    target: accountingservice
+    type: ASYNC # Kafka Consumer: payments
+
+  # Quotes flow (demo often includes a quote path)
+  - source: quoteservice
+    target: kafka
+    type: ASYNC # Kafka Producer: quotes
+  - source: kafka
+    target: quoteservice
+    type: ASYNC # Kafka Consumer: quotes-requests
+
+  # Feature flags (often HTTP/gRPC)
+  - source: frontend
+    target: featureflagservice
+    type: BLOCKING # HTTP
+
+  # Misc possible synchronous edges
+  - source: shippingservice
+    target: emailservice
+    type: BLOCKING # HTTP (notify shipment)
