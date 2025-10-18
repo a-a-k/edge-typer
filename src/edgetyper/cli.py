@@ -78,16 +78,15 @@ def extract_cmd(input_path: Path, out_path: Path, service_attr: str, min_spans: 
 
 # ---------------- graph ----------------
 @main.command("graph")
-@click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
-              help="Input Parquet with normalized spans (from 'extract').")
-@click.option("--out-events", "out_events", type=click.Path(dir_okay=False, path_type=Path), required=True,
-              help="Output Parquet with per-interaction events.")
-@click.option("--out-edges", "out_edges", type=click.Path(dir_okay=False, path_type=Path), required=True,
-              help="Output Parquet with aggregated service→service edges.")
-def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path) -> None:
-    """Construct RPC and messaging interactions and aggregate to service→service edges."""
+@click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--out-events", "out_events", type=click.Path(dir_okay=False, path_type=Path), required=True)
+@click.option("--out-edges", "out_edges", type=click.Path(dir_okay=False, path_type=Path), required=True)
+@click.option("--with-broker-edges/--no-broker-edges", default=True, show_default=True,
+              help="Emit producer→kafka and kafka→consumer edges in addition to producer→consumer.")
+@click.option("--broker-service", default="kafka", show_default=True, help="Name to use for the broker node.")
+def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path, with_broker_edges: bool, broker_service: str) -> None:
     spans = pd.read_parquet(spans_path)
-    results = build_graph(spans)
+    results = build_graph(spans, emit_broker_edges=with_broker_edges, broker_service_name=broker_service)
     out_events.parent.mkdir(parents=True, exist_ok=True)
     out_edges.parent.mkdir(parents=True, exist_ok=True)
     results.events.to_parquet(out_events, index=False)
