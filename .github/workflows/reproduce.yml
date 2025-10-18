@@ -62,22 +62,47 @@ jobs:
 
       - name: Add Collector "extras" (file exporter → OTLP-JSON)
         run: |
-          cat > vendor/opentelemetry-demo/src/otel-collector/otelcol-config-extras.yml <<'YAML'
+          # Detect extras dir (new path with hyphen vs old)
+          if [ -d vendor/opentelemetry-demo/src/otel-collector ]; then
+            EXTRAS_DIR="vendor/opentelemetry-demo/src/otel-collector"
+          elif [ -d vendor/opentelemetry-demo/src/otelcollector ]; then
+            EXTRAS_DIR="vendor/opentelemetry-demo/src/otelcollector"
+          else
+            echo "ERROR: could not find src/otel-collector{,/} directory in the demo repo."
+            ls -la vendor/opentelemetry-demo/src || true
+            exit 1
+          fi
+          echo "Using extras dir: $EXTRAS_DIR"
+
+          cat > "$EXTRAS_DIR/otelcol-config-extras.yml" <<'YAML'
           exporters:
             file/edgetyper:
               path: /data/otel-traces.json
           service:
             pipelines:
               traces:
-                # Arrays are replaced on merge; keep spanmetrics required by the demo.
+                # Arrays are replaced on merge; keep spanmetrics. See OTel Demo Docker docs.
                 exporters: [spanmetrics, file/edgetyper]
           YAML
 
-      - name: Compose override to mount /data into the collector
+      - name: Compose override to mount /data into the collector (auto-detect service)
         run: |
-          cat > vendor/opentelemetry-demo/docker-compose.override.yml <<'YAML'
+          DEMO_DIR="vendor/opentelemetry-demo"
+          # Determine collector service name from docker-compose.yml
+          if grep -qE '^[[:space:]]{2}otel-collector:' "$DEMO_DIR/docker-compose.yml"; then
+            COLLECTOR_SVC="otel-collector"
+          elif grep -qE '^[[:space:]]{2}otelcol:' "$DEMO_DIR/docker-compose.yml"; then
+            COLLECTOR_SVC="otelcol"
+          else
+            echo "ERROR: Could not detect collector service name in docker-compose.yml"
+            sed -n '1,200p' "$DEMO_DIR/docker-compose.yml" || true
+            exit 1
+          fi
+          echo "Collector service detected: ${COLLECTOR_SVC}"
+
+          cat > "$DEMO_DIR/docker-compose.override.yml" <<YAML
           services:
-            otelcol:
+            ${COLLECTOR_SVC}:
               volumes:
                 - ${RUN_DIR}/collector:/data
           YAML
