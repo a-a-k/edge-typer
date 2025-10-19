@@ -253,58 +253,104 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
 @main.command("report")
 @click.option("--metrics-dir", "metrics_dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--outdir", "outdir", type=click.Path(file_okay=False, path_type=Path), required=True)
-def report_cmd(metrics_dir: Path, outdir: Path) -> None:
+@click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional: features.parquet to compute coverage vs ground truth.")
+@click.option("--gt", "gt_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional: ground_truth.(yaml|csv) to compute coverage.")
+@click.option("--coverage-top", type=int, default=30, show_default=True,
+              help="How many unmatched edges to list in the coverage table.")
+def report_cmd(metrics_dir: Path, outdir: Path, features_path: Path | None, gt_path: Path | None, coverage_top: int) -> None:
     outdir.mkdir(parents=True, exist_ok=True)
+
+    # ---------- load metrics ----------
     items = []
     for p in sorted(metrics_dir.glob("**/metrics_*.json")):
         try:
             m = json.loads(p.read_text())
-            # If run_name missing (old files), infer from filename
             rn = m.get("run_name") or p.stem.replace("metrics_", "").replace("_", " ").title()
             m["run_name"] = rn
             items.append(m)
         except Exception:
             continue
 
-    # Sort in a friendly order if we recognize names
     order = {
-      "Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2,
-      "Baseline — Timing (SemConv dropped)": 3, "Baseline — SemConv (SemConv dropped)": 4, "EdgeTyper (ours) — SemConv dropped": 5,
-      "Baseline — Timing (Timing dropped)": 6, "Baseline — SemConv (Timing dropped)": 7, "EdgeTyper (ours) — Timing dropped": 8,
+        "Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2,
+        "Baseline — Timing (SemConv dropped)": 3,
+        "Baseline — SemConv (SemConv dropped)": 4,
+        "EdgeTyper (ours) — SemConv dropped": 5,
+        "Baseline — Timing (Timing dropped)": 6,
+        "Baseline — SemConv (Timing dropped)": 7,
+        "EdgeTyper (ours) — Timing dropped": 8,
     }
     items.sort(key=lambda x: order.get(x["run_name"], 99))
 
+    # ---------- optional coverage computation ----------
+    coverage_html = ""
+    if features_path and gt_path:
+        feats = pd.read_parquet(features_path)
+        gt_df, is_yaml = _load_ground_truth(gt_path)
 
-    def row(m):
-        rep = m.get("classification_report", {})
-        def s(cls, k):
-            return f'{rep.get(cls, {}).get(k, 0):.3f}'
-        # Confusion matrix unpack (labels are ["async", "sync"])
-        cm = m.get("confusion_matrix", [[0,0],[0,0]])
-        tn = cm[1][1]  # sync→sync
-        tp = cm[0][0]  # async→async
-        fp = cm[1][0]  # sync→async
-        fn = cm[0][1]  # async→sync
-        return f"""
-        <tr>
-          <td><b>{m["run_name"]}</b></td>
-          <td>{m.get("n_eval_edges", 0)}</td>
-          <td>{m.get("n_async", 0)}</td>
-          <td>{m.get("n_sync", 0)}</td>
-          <td>{s("async","precision")}/{s("async","recall")}/{s("async","f1-score")}</td>
-          <td>{s("sync","precision")}/{s("sync","recall")}/{s("sync","f1-score")}</td>
-          <td>{s("macro avg","precision")}/{s("macro avg","recall")}/{s("macro avg","f1-score")}</td>
-          <td>TP={tp}, FP={fp}, FN={fn}, TN={tn}</td>
-        </tr>
-        """
+        def _is_infra(name: str) -> bool:
+            n = _normalize_service_name(name)
+            # Treat infra/broker/services we don't score as infra for coverage.
+            tokens = {
+                "otelcollector", "otelcol", "otel", "jaeger", "opensearch",
+                "grafana", "prometheus", "loki", "tempo", "zookeeper",
+                "kafka", "kafkaui", "ui", "loadgenerator", "locust",
+            }
+            return any(t in n for t in tokens)
 
+        cand = feats[["src_service", "dst_service", "n_events", "n_rpc", "n_messaging"]].drop_duplicates()
+        cand = cand[~cand["src_service"].map(_is_infra) & ~cand["dst_service"].map(_is_infra)]
+
+        matched = _match_ground_truth(cand, gt_df, is_yaml=is_yaml)
+        n_total = int(cand.shape[0])
+        n_matched = int(matched.shape[0])
+        pct = (n_matched / n_total * 100.0) if n_total else 0.0
+
+        # Top unmatched by event volume
+        unmatched = (
+            cand.merge(matched.assign(_m=1), on=["src_service","dst_service"], how="left")
+                .query("_m.isna()")
+                .drop(columns=["_m"])
+                .sort_values("n_events", ascending=False)
+                .head(coverage_top)
+        )
+
+        # Render coverage block
+        coverage_html = ["<h2>Ground‑truth coverage</h2>"]
+        coverage_html.append(
+            f"<p>Matched <b>{n_matched}</b> of <b>{n_total}</b> discovered <i>app‑level</i> edges "
+            f"(<b>{pct:.1f}%</b>) after ignoring infra/broker edges (e.g., kafka, otel‑collector, jaeger).</p>"
+        )
+        if unmatched.empty:
+            coverage_html.append("<p>All discovered app edges are covered by ground truth.</p>")
+        else:
+            coverage_html.append("<p>Top unmatched edges by event volume:</p>")
+            coverage_html.append("<table><thead><tr>"
+                                 "<th>#</th><th>Edge</th><th>events</th><th>rpc</th><th>messaging</th>"
+                                 "</tr></thead><tbody>")
+            for i, r in enumerate(unmatched.itertuples(index=False), 1):
+                edge = f"{r.src_service} → {r.dst_service}"
+                coverage_html.append(
+                    f"<tr><td>{i}</td><td>{edge}</td><td>{int(r.n_events)}</td>"
+                    f"<td>{int(r.n_rpc)}</td><td>{int(r.n_messaging)}</td></tr>"
+                )
+            coverage_html.append("</tbody></table>")
+        coverage_html = "\n".join(coverage_html)
+
+    # ---------- render ----------
     html = [
         "<html><head><meta charset='utf-8'><title>EdgeTyper — Results</title>",
-        "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px} table{border-collapse:collapse;width:100%} th,td{border:1px solid #ddd;padding:8px;text-align:center} th{background:#f5f5f5}</style>",
+        "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
+        "table{border-collapse:collapse;width:100%}"
+        "th,td{border:1px solid #ddd;padding:8px;text-align:center}"
+        "th{background:#f5f5f5}</style>",
         "</head><body>",
         "<h1>EdgeTyper — Typed Service Edges</h1>",
-        "<p>Metrics are edge-level. Per-class cells show <em>precision/recall/F1</em>. Confusion matrix is for labels [async, sync].</p>",
+        "<p>Metrics are edge‑level. Per‑class cells show <em>precision/recall/F1</em>. Confusion matrix is for labels [async, sync].</p>",
     ]
+
     if not items:
         html.append("<p><b>No metrics found.</b></p>")
     else:
@@ -315,19 +361,41 @@ def report_cmd(metrics_dir: Path, outdir: Path) -> None:
               <th>Run</th><th>Eval edges</th><th>#Async (GT)</th><th>#Sync (GT)</th>
               <th>Async P/R/F1</th><th>Sync P/R/F1</th><th>Macro P/R/F1</th><th>Confusion (TP/FP/FN/TN)</th>
             </tr>
-          </thead><tbody>
-        """)
+          </thead><tbody>""")
+
+        def s(m, cls, k):
+            rep = m.get("classification_report", {})
+            return f'{rep.get(cls, {}).get(k, 0):.3f}'
+
         for m in items:
-            html.append(row(m))
+            cm = m.get("confusion_matrix", [[0,0],[0,0]])
+            tp, fp, fn, tn = cm[0][0], cm[1][0], cm[0][1], cm[1][1]
+            html.append(
+                "<tr>"
+                f"<td><b>{m['run_name']}</b></td>"
+                f"<td>{m.get('n_eval_edges',0)}</td>"
+                f"<td>{m.get('n_async',0)}</td>"
+                f"<td>{m.get('n_sync',0)}</td>"
+                f"<td>{s(m,'async','precision')}/{s(m,'async','recall')}/{s(m,'async','f1-score')}</td>"
+                f"<td>{s(m,'sync','precision')}/{s(m,'sync','recall')}/{s(m,'sync','f1-score')}</td>"
+                f"<td>{s(m,'macro avg','precision')}/{s(m,'macro avg','recall')}/{s(m,'macro avg','f1-score')}</td>"
+                f"<td>TP={tp}, FP={fp}, FN={fn}, TN={tn}</td>"
+                "</tr>"
+            )
         html.append("</tbody></table>")
 
-        # Short interpretation block
-        html.append("<h2>Interpretation</h2>")
-        html.append("<ul>")
-        html.append("<li><b>Baseline — SemConv</b> uses OpenTelemetry messaging semantics only (PRODUCER/CONSUMER & messaging.*). When the demo is fully instrumented, it should be near-perfect.</li>")
-        html.append("<li><b>Baseline — Timing</b> uses only timing/overlap. It can over-label edges as async if median lag ≥ 0 and overlap is low.</li>")
-        html.append("<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; when semantics are present it matches SemConv, and when they are missing it should degrade gracefully.</li>")
-        html.append("</ul>")
+    # Coverage block (if computed)
+    if coverage_html:
+        html.append(coverage_html)
+
+    # Interpretation block (unchanged)
+    html.append("<h2>Interpretation</h2><ul>"
+                "<li><b>Baseline — SemConv</b> uses OpenTelemetry messaging semantics only (PRODUCER/CONSUMER & messaging.*). "
+                "When the demo is fully instrumented, it should be near‑perfect.</li>"
+                "<li><b>Baseline — Timing</b> uses only timing/overlap. It can over‑label edges as async if median lag ≥ 0 and overlap is low.</li>"
+                "<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; when semantics are present it matches SemConv, "
+                "and when they are missing it should degrade gracefully.</li>"
+                "</ul>")
 
     html.append("</body></html>")
     (outdir / "index.html").write_text("\n".join(html))
