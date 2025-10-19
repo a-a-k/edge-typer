@@ -243,28 +243,72 @@ def report_cmd(metrics_dir: Path, outdir: Path) -> None:
     items = []
     for p in sorted(metrics_dir.glob("**/metrics_*.json")):
         try:
-            items.append(json.loads(p.read_text()))
+            m = json.loads(p.read_text())
+            # If run_name missing (old files), infer from filename
+            rn = m.get("run_name") or p.stem.replace("metrics_", "").replace("_", " ").title()
+            m["run_name"] = rn
+            items.append(m)
         except Exception:
             continue
-    html = ["<html><head><meta charset='utf-8'><title>EdgeTyper Report</title></head><body>"]
-    html.append("<h1>EdgeTyper — Results</h1>")
+
+    # Sort in a friendly order if we recognize names
+    order = {"Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2}
+    items.sort(key=lambda x: order.get(x["run_name"], 99))
+
+    def row(m):
+        rep = m.get("classification_report", {})
+        def s(cls, k):
+            return f'{rep.get(cls, {}).get(k, 0):.3f}'
+        # Confusion matrix unpack (labels are ["async", "sync"])
+        cm = m.get("confusion_matrix", [[0,0],[0,0]])
+        tn = cm[1][1]  # sync→sync
+        tp = cm[0][0]  # async→async
+        fp = cm[1][0]  # sync→async
+        fn = cm[0][1]  # async→sync
+        return f"""
+        <tr>
+          <td><b>{m["run_name"]}</b></td>
+          <td>{m.get("n_eval_edges", 0)}</td>
+          <td>{m.get("n_async", 0)}</td>
+          <td>{m.get("n_sync", 0)}</td>
+          <td>{s("async","precision")}/{s("async","recall")}/{s("async","f1-score")}</td>
+          <td>{s("sync","precision")}/{s("sync","recall")}/{s("sync","f1-score")}</td>
+          <td>{s("macro avg","precision")}/{s("macro avg","recall")}/{s("macro avg","f1-score")}</td>
+          <td>TP={tp}, FP={fp}, FN={fn}, TN={tn}</td>
+        </tr>
+        """
+
+    html = [
+        "<html><head><meta charset='utf-8'><title>EdgeTyper — Results</title>",
+        "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px} table{border-collapse:collapse;width:100%} th,td{border:1px solid #ddd;padding:8px;text-align:center} th{background:#f5f5f5}</style>",
+        "</head><body>",
+        "<h1>EdgeTyper — Typed Service Edges</h1>",
+        "<p>Metrics are edge-level. Per-class cells show <em>precision/recall/F1</em>. Confusion matrix is for labels [async, sync].</p>",
+    ]
     if not items:
-        html.append("<p>No metrics found.</p>")
+        html.append("<p><b>No metrics found.</b></p>")
     else:
+        html.append("""
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th><th>Eval edges</th><th>#Async (GT)</th><th>#Sync (GT)</th>
+              <th>Async P/R/F1</th><th>Sync P/R/F1</th><th>Macro P/R/F1</th><th>Confusion (TP/FP/FN/TN)</th>
+            </tr>
+          </thead><tbody>
+        """)
         for m in items:
-            html.append("<h2>Run</h2>")
-            html.append(f"<p>Evaluated edges: {m.get('n_eval_edges', 0)}</p>")
-            rep = m.get("classification_report", {})
-            for cls in ("async", "sync", "macro avg"):
-                if cls in rep:
-                    pr = rep[cls]
-                    html.append(
-                        f"<h3>{cls}</h3><ul>"
-                        f"<li>precision: {pr.get('precision', 0):.3f}</li>"
-                        f"<li>recall: {pr.get('recall', 0):.3f}</li>"
-                        f"<li>f1-score: {pr.get('f1-score', 0):.3f}</li>"
-                        "</ul>"
-                    )
+            html.append(row(m))
+        html.append("</tbody></table>")
+
+        # Short interpretation block
+        html.append("<h2>Interpretation</h2>")
+        html.append("<ul>")
+        html.append("<li><b>Baseline — SemConv</b> uses OpenTelemetry messaging semantics only (PRODUCER/CONSUMER & messaging.*). When the demo is fully instrumented, it should be near-perfect.</li>")
+        html.append("<li><b>Baseline — Timing</b> uses only timing/overlap. It can over-label edges as async if median lag ≥ 0 and overlap is low.</li>")
+        html.append("<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; when semantics are present it matches SemConv, and when they are missing it should degrade gracefully.</li>")
+        html.append("</ul>")
+
     html.append("</body></html>")
     (outdir / "index.html").write_text("\n".join(html))
     click.echo(f"[report] wrote {outdir / 'index.html'}")
