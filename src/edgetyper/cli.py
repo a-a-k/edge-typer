@@ -72,30 +72,33 @@ def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path, with_broker_e
 @click.option("--events", "events_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
-def featurize_cmd(events_path: Path, edges_path: Path, out_path: Path) -> None:
+@click.option(
+    "--mask-semconv",
+    is_flag=True, default=False, show_default=True,
+    help="Simulate missing messaging semantics: set p_messaging=0, n_messaging=0, any_messaging_semconv=False.",
+)
+def featurize_cmd(events_path: Path, edges_path: Path, out_path: Path, mask_semconv: bool) -> None:
     events = pd.read_parquet(events_path)
     edges = pd.read_parquet(edges_path)
-
     f_sem = features_semconv(events, edges)
     f_tim = features_timing(events)
-
     feats = f_sem.merge(f_tim, on=["src_service", "dst_service"], how="left")
 
-    # ---- Guarantee timing features exist (esp. p_nonneg_lag) ----
-    if "median_lag_ns" not in feats.columns:
-        feats["median_lag_ns"] = 0
-    if "p_overlap" not in feats.columns:
-        feats["p_overlap"] = 0.0
-    if "p_nonneg_lag" not in feats.columns:
-        # Conservative fallback: treat non-negative lag as present when median lag >= 0
-        feats["p_nonneg_lag"] = (feats["median_lag_ns"] >= 0).astype(float)
+    # Guarantee timing columns exist
+    if "median_lag_ns" not in feats.columns: feats["median_lag_ns"] = 0
+    if "p_overlap" not in feats.columns:     feats["p_overlap"] = 0.0
+    if "p_nonneg_lag" not in feats.columns:  feats["p_nonneg_lag"] = (feats["median_lag_ns"] >= 0).astype(float)
 
-    # Fill any remaining NaNs from join
+    # ---- robustness knob: hide SemConv features ----
+    if mask_semconv:
+        feats["n_messaging"] = 0
+        feats["p_messaging"] = 0.0
+        feats["any_messaging_semconv"] = False
+
     feats = feats.fillna({"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0})
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     feats.to_parquet(out_path, index=False)
-    click.echo(f"[featurize] wrote {len(feats)} edges → {out_path}")
+    click.echo(f"[featurize{' (masked) ' if mask_semconv else ' '}] wrote {len(feats)} edges → {out_path}")
 
 
 # ---------------- baseline ----------------
@@ -252,8 +255,12 @@ def report_cmd(metrics_dir: Path, outdir: Path) -> None:
             continue
 
     # Sort in a friendly order if we recognize names
-    order = {"Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2}
+    order = {
+      "Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2,
+      "Baseline — Timing (dropped)": 3, "Baseline — SemConv (dropped)": 4, "EdgeTyper (ours) — SemConv dropped": 5,
+    }
     items.sort(key=lambda x: order.get(x["run_name"], 99))
+
 
     def row(m):
         rep = m.get("classification_report", {})
