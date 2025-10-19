@@ -176,26 +176,23 @@ jobs:
           DOCKER_VER=$(docker --version | sed 's/,//g')
           COMPOSE_VER=$(docker compose version | sed 's/,//g' || true)
           PY_VER=$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
-          PKG_VER=$(python -c 'import importlib; print(getattr(importlib.import_module("edgetyper"), "__version__", "dev"))' || echo "dev")
+          PKG_VER=$(python -c 'import importlib; m=importlib.import_module("edgetyper"); print(getattr(m, "__version__", "dev"))' || echo "dev")
           TRACE="${RUN_DIR}/collector/otel-traces.json"
-          SIZE_MB=$(python - <<PY
-      import os,sys; p=sys.argv[1]; s=os.path.getsize(p) if os.path.exists(p) else 0; print(round(s/1024/1024,2))
-      PY
-          "$TRACE")
+          SIZE_MB=$(python -c 'import os; p=os.environ.get("TRACE",""); s=os.path.getsize(p) if os.path.exists(p) else 0; print(round(s/1024/1024,2))')
           cat > "${RUN_DIR}/provenance.json" <<JSON
-      {
-        "target": "otel-demo",
-        "demo_ref": "${{ inputs.demo_ref || 'main' }}",
-        "demo_commit": "$DEMO_COMMIT",
-        "soak_seconds": "${SOAK_SECONDS}",
-        "traces_size_mb": "$SIZE_MB",
-        "docker_version": "$DOCKER_VER",
-        "compose_version": "$COMPOSE_VER",
-        "python_version": "$PY_VER",
-        "edgetyper_version": "$PKG_VER"
-      }
-      JSON
-          cat "${RUN_DIR}/provenance.json"
+          {
+            "target": "otel-demo",
+            "demo_ref": "${{ inputs.demo_ref || 'main' }}",
+            "demo_commit": "$DEMO_COMMIT",
+            "soak_seconds": "${SOAK_SECONDS}",
+            "traces_size_mb": "$SIZE_MB",
+            "docker_version": "$DOCKER_VER",
+            "compose_version": "$COMPOSE_VER",
+            "python_version": "$PY_VER",
+            "edgetyper_version": "$PKG_VER"
+          }
+          JSON
+          echo "Provenance:" && cat "${RUN_DIR}/provenance.json"
 
 
       - name: Extract → Graph → Featurize
