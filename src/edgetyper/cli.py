@@ -191,7 +191,9 @@ def _match_ground_truth(edges_df: pd.DataFrame, gt_df: pd.DataFrame, is_yaml: bo
 @click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--gt", "gt_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
-def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path) -> None:
+@click.option("--name", "run_name", type=str, default=None,
+              help="Human-readable label for this run (e.g., 'Baseline — SemConv').")
+def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path, run_name: str | None) -> None:
     pred = pd.read_csv(pred_path)
     feats = pd.read_parquet(features_path)
     gt_df, is_yaml = _load_ground_truth(gt_path)
@@ -202,22 +204,34 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
         raise click.ClickException("No edges matched ground truth; check service names/tag and ground_truth file.")
 
     # Metrics
-    y_true = merged["gt_label"].astype(str)
-    y_pred = merged["pred_label"].astype(str)
     from sklearn.metrics import classification_report, confusion_matrix
     labels = ["async", "sync"]
+    y_true = merged["gt_label"].astype(str)
+    y_pred = merged["pred_label"].astype(str)
     report = classification_report(y_true, y_pred, labels=labels, output_dict=True, zero_division=0)
     cm = confusion_matrix(y_true, y_pred, labels=labels).tolist()
 
+    # Class counts
+    n_async = int((y_true == "async").sum())
+    n_sync = int((y_true == "sync").sum())
+
+    # Name fallback from filename if --name not given
+    if not run_name:
+        stem = Path(pred_path).stem  # e.g., pred_ours
+        run_name = stem.replace("pred_", "").replace("_", " ").title()
+
     metrics: Dict[str, object] = {
+        "run_name": run_name,
         "labels": labels,
+        "n_eval_edges": int(len(merged)),
+        "n_async": n_async,
+        "n_sync": n_sync,
         "classification_report": report,
         "confusion_matrix": cm,
-        "n_eval_edges": int(len(merged)),
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(metrics, indent=2))
-    click.echo(f"[eval] evaluated {len(merged)} edges → {out_path}")
+    click.echo(f"[eval] ({run_name}) evaluated {len(merged)} edges → {out_path}")
 
 
 # ---------------- report ----------------
