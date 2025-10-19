@@ -243,7 +243,10 @@ jobs:
             --out "${RUN_DIR}/metrics_timing_masktiming.json"
       
           # Rebuild the report (it will ingest all metrics_*.json)
-          edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
+          edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site" \
+            --features "${RUN_DIR}/features.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --coverage-top 30
 
 
       - name: Debug table (matched edges + features)
