@@ -191,11 +191,29 @@ jobs:
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
 
 
-      - name: Evaluate (vs YAML ground truth) + Report
+      - name: Evaluate (full semantics) + Report
         run: |
-          edgetyper eval --name "EdgeTyper (ours)"    --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours.json"
-          edgetyper eval --name "Baseline — SemConv"  --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv.json"
-          edgetyper eval --name "Baseline — Timing"   --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
+          # Full-semantics evaluation
+          edgetyper eval --name "EdgeTyper (ours)"   --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours.json"
+          edgetyper eval --name "Baseline — SemConv" --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv.json"
+          edgetyper eval --name "Baseline — Timing"  --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
+      
+          # Robustness: mask SemConv, then re-run all methods (rules-only by default)
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_masked.parquet" --mask-semconv
+          edgetyper baseline  --features "${RUN_DIR}/features_masked.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv_masked.csv"
+          edgetyper baseline  --features "${RUN_DIR}/features_masked.parquet" --mode timing  --out "${RUN_DIR}/pred_timing_masked.csv"
+          edgetyper label     --features "${RUN_DIR}/features_masked.parquet"              --out "${RUN_DIR}/pred_ours_masked.csv"   # rules-only (no ML)
+      
+          edgetyper eval --name "EdgeTyper (ours) — SemConv dropped" \
+            --pred "${RUN_DIR}/pred_ours_masked.csv"    --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours_masked.json"
+      
+          edgetyper eval --name "Baseline — SemConv (dropped)" \
+            --pred "${RUN_DIR}/pred_semconv_masked.csv" --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv_masked.json"
+      
+          edgetyper eval --name "Baseline — Timing (dropped)" \
+            --pred "${RUN_DIR}/pred_timing_masked.csv"  --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing_masked.json"
+      
+          # Rebuild report: it auto-picks all metrics_*.json (both normal & masked)
           edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
 
 
