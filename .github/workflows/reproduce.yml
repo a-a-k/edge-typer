@@ -38,6 +38,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+
       - name: Sanity (edgetyper import works)
         run: |
           python - <<'PY'
@@ -47,15 +48,18 @@ jobs:
           print("edgetyper module =", edgetyper.__file__)
           PY
 
+
       - name: Check Docker & Compose
         run: |
           docker --version
           docker compose version
 
+
       - name: Prepare run dir
         run: |
           echo "RUN_DIR=${{ github.workspace }}/runs/${{ github.run_id }}" >> $GITHUB_ENV
           mkdir -p "${{ github.workspace }}/runs/${{ github.run_id }}/collector" site
+
 
       - name: Clone OpenTelemetry Demo at requested ref
         env:
@@ -68,6 +72,7 @@ jobs:
           git fetch --depth 1 origin "${DEMO_REF}"
           git checkout --detach FETCH_HEAD
           git rev-parse --short HEAD
+
 
       - name: Add Collector "extras" (file exporter → OTLP-JSON)
         run: |
@@ -94,6 +99,7 @@ jobs:
                 exporters: [spanmetrics, file/edgetyper]
           YAML
 
+
       - name: Compose override to mount /data into the collector (auto-detect service)
         run: |
           DEMO_DIR="vendor/opentelemetry-demo"
@@ -116,10 +122,12 @@ jobs:
                 - ${RUN_DIR}/collector:/data
           YAML
 
+
       - name: Bring up OTel Demo (detached)
         working-directory: vendor/opentelemetry-demo
         run: |
           docker compose up --force-recreate --remove-orphans --detach
+
 
       - name: Wait for health & soak traffic
         env:
@@ -138,6 +146,7 @@ jobs:
           echo "Soaking for ${SOAK_SECONDS}s (Locust load generator drives traffic)…"
           sleep "${SOAK_SECONDS}"
 
+
       - name: Check that traces file exists
         run: |
           if [ ! -s "${RUN_DIR}/collector/otel-traces.json" ]; then
@@ -145,20 +154,24 @@ jobs:
             exit 2
           fi
 
+
       - name: Tear down the demo
         working-directory: vendor/opentelemetry-demo
         run: |
           docker compose down -v
 
+
       - name: Show captured trace file
         run: |
           ls -lh "${RUN_DIR}/collector" || true
+
 
       - name: Extract → Graph → Featurize
         run: |
           edgetyper extract   --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
           edgetyper graph     --spans "${RUN_DIR}/spans.parquet" --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features.parquet"
+
 
       - name: Inspect feature columns
         run: |
@@ -170,11 +183,13 @@ jobs:
           print("rows:", len(df))
           PY
 
+
       - name: Baselines + Our labels
         run: |
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+
 
       - name: Evaluate (vs YAML ground truth) + Report
         run: |
@@ -183,6 +198,15 @@ jobs:
           edgetyper eval --name "Baseline — Timing"   --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
           edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
 
+
+      - name: Debug table (matched edges + features)
+        run: |
+          edgetyper debug --features "${RUN_DIR}/features.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --pred "${RUN_DIR}/pred_ours.csv" \
+            --out "${RUN_DIR}/debug_matched_edges.csv"
+
+
       - name: Upload results bundle (traces + outputs)
         uses: actions/upload-artifact@v4
         with:
@@ -190,6 +214,7 @@ jobs:
           path: |
             runs/${{ github.run_id }}/
             site/
+
       
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
@@ -208,4 +233,3 @@ jobs:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
-
