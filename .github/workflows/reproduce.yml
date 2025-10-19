@@ -176,11 +176,11 @@ jobs:
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
 
-      - name: Evaluate (vs regex ground truth) + Report
+      - name: Evaluate (vs YAML ground truth) + Report
         run: |
-          edgetyper eval   --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours.json"
-          edgetyper eval   --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv.json"
-          edgetyper eval   --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
+          edgetyper eval --name "EdgeTyper (ours)"    --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours.json"
+          edgetyper eval --name "Baseline — SemConv"  --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv.json"
+          edgetyper eval --name "Baseline — Timing"   --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
           edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
 
       - name: Upload results bundle (traces + outputs)
