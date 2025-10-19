@@ -33,6 +33,10 @@ def main() -> None:
     """EdgeTyper CLI (OpenTelemetry Demo → traces → analysis)."""
     pass
 
+@click.option("--count-mode",
+              type=click.Choice(["pred", "gt", "both"], case_sensitive=False),
+              default="pred", show_default=True,
+              help="Which counts to show in the metrics table: predicted by each run, ground truth, or both.")
 
 # ---------------- extract ----------------
 @main.command("extract")
@@ -266,10 +270,15 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
               help="Optional provenance.json describing the capture run (commit/ref/soak, etc.).")
 @click.option("--assets-dir", "assets_dir", type=click.Path(file_okay=False, path_type=Path), required=False,
               help="Optional directory under outdir to place downloadable CSVs (default: outdir/data).")
+@click.option("--count-mode",
+              type=click.Choice(["pred", "gt", "both"], case_sensitive=False),
+              default="pred", show_default=True,
+              help="Which counts to show in the metrics table: predicted by each run, ground truth, or both.")
 def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
                edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
-               prov_path: Path | None, assets_dir: Path | None) -> None:
-    import shutil
+               prov_path: Path | None, assets_dir: Path | None, count_mode: str) -> None:
+    import re, shutil
+
     outdir.mkdir(parents=True, exist_ok=True)
     assets = assets_dir or (outdir / "data")
     assets.mkdir(parents=True, exist_ok=True)
@@ -285,24 +294,40 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         except Exception:
             continue
 
-    order = {
-        "Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2,
-        "EdgeTyper (ours) — SemConv dropped": 3,
-        "Baseline — Timing (SemConv dropped)": 4,
-        "Baseline — SemConv (SemConv dropped)": 5,
-        "Baseline — Timing (Timing dropped)": 6,
-        "Baseline — SemConv (Timing dropped)": 7,
-        "EdgeTyper (ours) — Timing dropped": 8,
-    }
-    items.sort(key=lambda x: order.get(x["run_name"], 99))
+    # Canonicalize names and group by scenario → method
+    def canon(name: str) -> str:
+        name = re.sub(r"\s+", " ", name).strip()
+        name = name.replace("(dropped)", "(SemConv dropped)")  # normalize older names
+        return name
+
+    def scenario_of(name: str) -> str:
+        if "SemConv dropped" in name: return "semconv"
+        if "Timing dropped"  in name: return "timing"
+        return "full"
+
+    def method_of(name: str) -> str:
+        if "EdgeTyper (ours)" in name: return "ours"
+        if "SemConv" in name:          return "semconv"
+        return "timing"
+
+    dedup = {}
+    for m in items:
+        m["run_name"] = canon(m["run_name"])
+        key = (scenario_of(m["run_name"]), method_of(m["run_name"]))
+        dedup[key] = m  # keep last if duplicates
+    items = list(dedup.values())
+
+    scenario_order = {"full": 0, "semconv": 1, "timing": 2}
+    method_order   = {"timing": 0, "semconv": 1, "ours": 2}
+    items.sort(key=lambda m: (scenario_order[scenario_of(m["run_name"])],
+                              method_order[method_of(m["run_name"])]))
 
     # ---------- snapshot (counts & tops) ----------
-    spans_df = pd.read_parquet(spans_path) if spans_path else None
+    spans_df  = pd.read_parquet(spans_path)  if spans_path  else None
     events_df = pd.read_parquet(events_path) if events_path else None
     edges_df  = pd.read_parquet(edges_path)  if edges_path  else None
     feats_df  = pd.read_parquet(features_path) if features_path else None
 
-    # Counts
     n_spans = len(spans_df) if spans_df is not None else None
     n_services = int(spans_df["service_name"].nunique()) if spans_df is not None and "service_name" in spans_df.columns else None
     n_events = len(events_df) if events_df is not None else None
@@ -310,7 +335,6 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     n_edges_rpc = int((edges_df["n_rpc"] > 0).sum()) if edges_df is not None else None
     n_edges_msg = int((edges_df["n_messaging"] > 0).sum()) if edges_df is not None else None
 
-    # Top services (by span count)
     top_services_html = ""
     if spans_df is not None:
         top_svc = (
@@ -326,7 +350,6 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             "<p><a href='data/top_services.csv' download>Download CSV</a></p>"
         )
 
-    # Top edges (by events)
     top_edges_html = ""
     if edges_df is not None:
         top_edges = (
@@ -356,7 +379,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             n = _normalize_service_name(name)
             tokens = {"otelcollector","otelcol","otel","jaeger","opensearch",
                       "grafana","prometheus","loki","tempo","zookeeper",
-                      "kafka","kafkaui","ui","loadgenerator","locust"}
+                      "kafka","kafkaui","ui","loadgenerator","locust","frontendproxy"}
             return any(t in n for t in tokens)
 
         cand = feats_df[["src_service","dst_service","n_events","n_rpc","n_messaging"]].drop_duplicates()
@@ -422,7 +445,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         except Exception:
             pass
 
-    # ---------- render metrics table ----------
+    # ---------- render (title + metrics) ----------
     html = [
         "<html><head><meta charset='utf-8'><title>EdgeTyper — Results</title>",
         "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
@@ -431,17 +454,27 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         "th{background:#f5f5f5}</style>",
         "</head><body>",
         "<h1>EdgeTyper — Typed Service Edges</h1>",
-        "<p>Metrics are edge‑level. Per‑class cells show <em>precision/recall/F1</em>. Confusion matrix is for labels [async, sync].</p>",
+        "<p>Metrics are edge‑level. Per‑class cells show <em>precision/recall/F1</em>. "
+        "Confusion matrix is for labels [async, sync]. "
+        f"Counts shown below are <b>{count_mode.upper()}</b> per run.</p>",
     ]
 
     if not items:
         html.append("<p><b>No metrics found.</b></p>")
     else:
-        html.append("""
+        # dynamic count header
+        if count_mode.lower() == "pred":
+            count_hdr = "<th>#Pred Async</th><th>#Pred Sync</th>"
+        elif count_mode.lower() == "gt":
+            count_hdr = "<th>#Async (GT)</th><th>#Sync (GT)</th>"
+        else:
+            count_hdr = "<th>#Async (GT)</th><th>#Sync (GT)</th><th>#Pred Async</th><th>#Pred Sync</th>"
+
+        html.append(f"""
         <table>
           <thead>
             <tr>
-              <th>Run</th><th>Eval edges</th><th>#Async (GT)</th><th>#Sync (GT)</th>
+              <th>Run</th><th>Eval edges</th>{count_hdr}
               <th>Async P/R/F1</th><th>Sync P/R/F1</th><th>Macro P/R/F1</th><th>Confusion (TP/FP/FN/TN)</th>
             </tr>
           </thead><tbody>""")
@@ -452,13 +485,25 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
 
         for m in items:
             cm = m.get("confusion_matrix", [[0,0],[0,0]])
+            # labels: [async, sync]
             tp, fp, fn, tn = cm[0][0], cm[1][0], cm[0][1], cm[1][1]
+            gt_async  = tp + fn
+            gt_sync   = tn + fp
+            pred_async = tp + fp
+            pred_sync  = tn + fn
+
+            if count_mode.lower() == "pred":
+                counts_html = f"<td>{pred_async}</td><td>{pred_sync}</td>"
+            elif count_mode.lower() == "gt":
+                counts_html = f"<td>{gt_async}</td><td>{gt_sync}</td>"
+            else:
+                counts_html = f"<td>{gt_async}</td><td>{gt_sync}</td><td>{pred_async}</td><td>{pred_sync}</td>"
+
             html.append(
                 "<tr>"
                 f"<td><b>{m['run_name']}</b></td>"
-                f"<td>{m.get('n_eval_edges',0)}</td>"
-                f"<td>{m.get('n_async',0)}</td>"
-                f"<td>{m.get('n_sync',0)}</td>"
+                f"<td>{m.get('n_eval_edges', gt_async + gt_sync)}</td>"
+                f"{counts_html}"
                 f"<td>{s(m,'async','precision')}/{s(m,'async','recall')}/{s(m,'async','f1-score')}</td>"
                 f"<td>{s(m,'sync','precision')}/{s(m,'sync','recall')}/{s(m,'sync','f1-score')}</td>"
                 f"<td>{s(m,'macro avg','precision')}/{s(m,'macro avg','recall')}/{s(m,'macro avg','f1-score')}</td>"
@@ -467,7 +512,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             )
         html.append("</tbody></table>")
 
-    # ---------- snapshot block ----------
+    # ---------- snapshot ----------
     snapshot_rows = []
     if n_spans is not None:     snapshot_rows.append(f"<tr><td>Spans parsed</td><td>{n_spans}</td></tr>")
     if n_services is not None:  snapshot_rows.append(f"<tr><td>Services discovered</td><td>{n_services}</td></tr>")
