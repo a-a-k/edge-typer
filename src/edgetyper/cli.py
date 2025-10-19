@@ -253,14 +253,26 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
 @main.command("report")
 @click.option("--metrics-dir", "metrics_dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--outdir", "outdir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
+@click.option("--events", "events_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
+@click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
 @click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
-              help="Optional: features.parquet to compute coverage vs ground truth.")
+              help="Optional features.parquet to compute coverage and snapshot.")
 @click.option("--gt", "gt_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
-              help="Optional: ground_truth.(yaml|csv) to compute coverage.")
+              help="Optional ground_truth.(yaml|csv) to compute coverage.")
 @click.option("--coverage-top", type=int, default=30, show_default=True,
               help="How many unmatched edges to list in the coverage table.")
-def report_cmd(metrics_dir: Path, outdir: Path, features_path: Path | None, gt_path: Path | None, coverage_top: int) -> None:
+@click.option("--provenance", "prov_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional provenance.json describing the capture run (commit/ref/soak, etc.).")
+@click.option("--assets-dir", "assets_dir", type=click.Path(file_okay=False, path_type=Path), required=False,
+              help="Optional directory under outdir to place downloadable CSVs (default: outdir/data).")
+def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
+               edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
+               prov_path: Path | None, assets_dir: Path | None) -> None:
+    import shutil
     outdir.mkdir(parents=True, exist_ok=True)
+    assets = assets_dir or (outdir / "data")
+    assets.mkdir(parents=True, exist_ok=True)
 
     # ---------- load metrics ----------
     items = []
@@ -275,71 +287,142 @@ def report_cmd(metrics_dir: Path, outdir: Path, features_path: Path | None, gt_p
 
     order = {
         "Baseline — Timing": 0, "Baseline — SemConv": 1, "EdgeTyper (ours)": 2,
-        "Baseline — Timing (SemConv dropped)": 3,
-        "Baseline — SemConv (SemConv dropped)": 4,
-        "EdgeTyper (ours) — SemConv dropped": 5,
+        "EdgeTyper (ours) — SemConv dropped": 3,
+        "Baseline — Timing (SemConv dropped)": 4,
+        "Baseline — SemConv (SemConv dropped)": 5,
         "Baseline — Timing (Timing dropped)": 6,
         "Baseline — SemConv (Timing dropped)": 7,
         "EdgeTyper (ours) — Timing dropped": 8,
     }
     items.sort(key=lambda x: order.get(x["run_name"], 99))
 
-    # ---------- optional coverage computation ----------
+    # ---------- snapshot (counts & tops) ----------
+    spans_df = pd.read_parquet(spans_path) if spans_path else None
+    events_df = pd.read_parquet(events_path) if events_path else None
+    edges_df  = pd.read_parquet(edges_path)  if edges_path  else None
+    feats_df  = pd.read_parquet(features_path) if features_path else None
+
+    # Counts
+    n_spans = len(spans_df) if spans_df is not None else None
+    n_services = int(spans_df["service_name"].nunique()) if spans_df is not None and "service_name" in spans_df.columns else None
+    n_events = len(events_df) if events_df is not None else None
+    n_edges  = len(edges_df)  if edges_df  is not None else None
+    n_edges_rpc = int((edges_df["n_rpc"] > 0).sum()) if edges_df is not None else None
+    n_edges_msg = int((edges_df["n_messaging"] > 0).sum()) if edges_df is not None else None
+
+    # Top services (by span count)
+    top_services_html = ""
+    if spans_df is not None:
+        top_svc = (
+            spans_df.groupby("service_name", as_index=False).size().sort_values("size", ascending=False).head(10)
+        )
+        (assets / "top_services.csv").write_text(top_svc.to_csv(index=False))
+        rows = "".join(f"<tr><td>{i+1}</td><td>{r.service_name}</td><td>{int(r.size)}</td></tr>"
+                       for i, r in enumerate(top_svc.itertuples(index=False)))
+        top_services_html = (
+            "<h3>Top services by span count</h3>"
+            "<table><thead><tr><th>#</th><th>Service</th><th>spans</th></tr></thead><tbody>"
+            f"{rows}</tbody></table>"
+            "<p><a href='data/top_services.csv' download>Download CSV</a></p>"
+        )
+
+    # Top edges (by events)
+    top_edges_html = ""
+    if edges_df is not None:
+        top_edges = (
+            edges_df.sort_values("n_events", ascending=False)
+                    .loc[:, ["src_service","dst_service","n_events","n_rpc","n_messaging"]]
+                    .head(10)
+        )
+        (assets / "top_edges.csv").write_text(top_edges.to_csv(index=False))
+        rows = "".join(
+            f"<tr><td>{i+1}</td><td>{r.src_service} → {r.dst_service}</td>"
+            f"<td>{int(r.n_events)}</td><td>{int(r.n_rpc)}</td><td>{int(r.n_messaging)}</td></tr>"
+            for i, r in enumerate(top_edges.itertuples(index=False))
+        )
+        top_edges_html = (
+            "<h3>Top edges by events</h3>"
+            "<table><thead><tr><th>#</th><th>Edge</th><th>events</th><th>rpc</th><th>messaging</th></tr></thead><tbody>"
+            f"{rows}</tbody></table>"
+            "<p><a href='data/top_edges.csv' download>Download CSV</a></p>"
+        )
+
+    # ---------- coverage computation ----------
     coverage_html = ""
-    if features_path and gt_path:
-        feats = pd.read_parquet(features_path)
+    if feats_df is not None and gt_path:
         gt_df, is_yaml = _load_ground_truth(gt_path)
 
         def _is_infra(name: str) -> bool:
             n = _normalize_service_name(name)
-            # Treat infra/broker/services we don't score as infra for coverage.
-            tokens = {
-                "otelcollector", "otelcol", "otel", "jaeger", "opensearch",
-                "grafana", "prometheus", "loki", "tempo", "zookeeper",
-                "kafka", "kafkaui", "ui", "loadgenerator", "locust",
-            }
+            tokens = {"otelcollector","otelcol","otel","jaeger","opensearch",
+                      "grafana","prometheus","loki","tempo","zookeeper",
+                      "kafka","kafkaui","ui","loadgenerator","locust"}
             return any(t in n for t in tokens)
 
-        cand = feats[["src_service", "dst_service", "n_events", "n_rpc", "n_messaging"]].drop_duplicates()
+        cand = feats_df[["src_service","dst_service","n_events","n_rpc","n_messaging"]].drop_duplicates()
         cand = cand[~cand["src_service"].map(_is_infra) & ~cand["dst_service"].map(_is_infra)]
-
         matched = _match_ground_truth(cand, gt_df, is_yaml=is_yaml)
-        n_total = int(cand.shape[0])
-        n_matched = int(matched.shape[0])
-        pct = (n_matched / n_total * 100.0) if n_total else 0.0
+        n_total = int(cand.shape[0]); n_matched = int(matched.shape[0]); pct = (n_matched/n_total*100.0) if n_total else 0.0
 
-        # Top unmatched by event volume
         unmatched = (
             cand.merge(matched.assign(_m=1), on=["src_service","dst_service"], how="left")
-                .query("_m.isna()")
-                .drop(columns=["_m"])
-                .sort_values("n_events", ascending=False)
-                .head(coverage_top)
+                .query("_m.isna()").drop(columns=["_m"])
+                .sort_values("n_events", ascending=False).head(coverage_top)
         )
+        (assets / "coverage_unmatched_top.csv").write_text(unmatched.to_csv(index=False))
 
-        # Render coverage block
-        coverage_html = ["<h2>Ground‑truth coverage</h2>"]
-        coverage_html.append(
+        rows = "".join(
+            f"<tr><td>{i+1}</td><td>{r.src_service} → {r.dst_service}</td>"
+            f"<td>{int(r.n_events)}</td><td>{int(r.n_rpc)}</td><td>{int(r.n_messaging)}</td></tr>"
+            for i, r in enumerate(unmatched.itertuples(index=False))
+        )
+        coverage_html = (
+            "<h2>Ground‑truth coverage</h2>"
             f"<p>Matched <b>{n_matched}</b> of <b>{n_total}</b> discovered <i>app‑level</i> edges "
-            f"(<b>{pct:.1f}%</b>) after ignoring infra/broker edges (e.g., kafka, otel‑collector, jaeger).</p>"
+            f"(<b>{pct:.1f}%</b>) after ignoring infra/broker edges.</p>"
+            "<p>Top unmatched edges by event volume:</p>"
+            "<table><thead><tr><th>#</th><th>Edge</th><th>events</th><th>rpc</th><th>messaging</th></tr></thead><tbody>"
+            f"{rows}</tbody></table>"
+            "<p><a href='data/coverage_unmatched_top.csv' download>Download CSV</a></p>"
         )
-        if unmatched.empty:
-            coverage_html.append("<p>All discovered app edges are covered by ground truth.</p>")
-        else:
-            coverage_html.append("<p>Top unmatched edges by event volume:</p>")
-            coverage_html.append("<table><thead><tr>"
-                                 "<th>#</th><th>Edge</th><th>events</th><th>rpc</th><th>messaging</th>"
-                                 "</tr></thead><tbody>")
-            for i, r in enumerate(unmatched.itertuples(index=False), 1):
-                edge = f"{r.src_service} → {r.dst_service}"
-                coverage_html.append(
-                    f"<tr><td>{i}</td><td>{edge}</td><td>{int(r.n_events)}</td>"
-                    f"<td>{int(r.n_rpc)}</td><td>{int(r.n_messaging)}</td></tr>"
-                )
-            coverage_html.append("</tbody></table>")
-        coverage_html = "\n".join(coverage_html)
 
-    # ---------- render ----------
+    # ---------- Downloads: copy debug CSV if present ----------
+    debug_src = next(metrics_dir.glob("**/debug_matched_edges.csv"), None)
+    debug_link_html = ""
+    if debug_src and debug_src.is_file():
+        dst = assets / "debug_matched_edges.csv"
+        try:
+            shutil.copyfile(debug_src, dst)
+            debug_link_html = "<li><a href='data/debug_matched_edges.csv' download>debug_matched_edges.csv</a> (matched edges + features + predictions)</li>"
+        except Exception:
+            pass
+
+    # ---------- Provenance ----------
+    prov_html = ""
+    if prov_path and prov_path.exists():
+        try:
+            prov = json.loads(prov_path.read_text())
+            def g(k, d="—"): return prov.get(k, d)
+            rows = "".join([
+                f"<tr><td>Target</td><td>{g('target')}</td></tr>",
+                f"<tr><td>Demo ref</td><td>{g('demo_ref')}</td></tr>",
+                f"<tr><td>Demo commit</td><td><code>{g('demo_commit')}</code></td></tr>",
+                f"<tr><td>Soak seconds</td><td>{g('soak_seconds')}</td></tr>",
+                f"<tr><td>Trace file size</td><td>{g('traces_size_mb','—')} MB</td></tr>",
+                f"<tr><td>Docker</td><td>{g('docker_version')}</td></tr>",
+                f"<tr><td>Compose</td><td>{g('compose_version')}</td></tr>",
+                f"<tr><td>Python</td><td>{g('python_version')}</td></tr>",
+                f"<tr><td>EdgeTyper</td><td>{g('edgetyper_version')}</td></tr>",
+            ])
+            prov_html = (
+                "<h2>Provenance</h2>"
+                "<table><thead><tr><th>Key</th><th>Value</th></tr></thead><tbody>"
+                f"{rows}</tbody></table>"
+            )
+        except Exception:
+            pass
+
+    # ---------- render metrics table ----------
     html = [
         "<html><head><meta charset='utf-8'><title>EdgeTyper — Results</title>",
         "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
@@ -384,17 +467,41 @@ def report_cmd(metrics_dir: Path, outdir: Path, features_path: Path | None, gt_p
             )
         html.append("</tbody></table>")
 
-    # Coverage block (if computed)
-    if coverage_html:
-        html.append(coverage_html)
+    # ---------- snapshot block ----------
+    snapshot_rows = []
+    if n_spans is not None:     snapshot_rows.append(f"<tr><td>Spans parsed</td><td>{n_spans}</td></tr>")
+    if n_services is not None:  snapshot_rows.append(f"<tr><td>Services discovered</td><td>{n_services}</td></tr>")
+    if n_events is not None:    snapshot_rows.append(f"<tr><td>Interactions (events)</td><td>{n_events}</td></tr>")
+    if n_edges is not None:     snapshot_rows.append(f"<tr><td>Edges discovered</td><td>{n_edges}</td></tr>")
+    if n_edges_rpc is not None and n_edges_msg is not None:
+        snapshot_rows.append(f"<tr><td>Edges by type</td><td>rpc={n_edges_rpc}, messaging={n_edges_msg}</td></tr>")
 
-    # Interpretation block (unchanged)
+    if snapshot_rows:
+        html.append("<h2>Dataset snapshot</h2>"
+                    "<table><thead><tr><th>Metric</th><th>Value</th></tr></thead><tbody>"
+                    + "".join(snapshot_rows) + "</tbody></table>")
+    if top_services_html: html.append(top_services_html)
+    if top_edges_html:    html.append(top_edges_html)
+
+    # ---------- coverage, provenance, downloads ----------
+    if coverage_html: html.append(coverage_html)
+    if prov_html:     html.append(prov_html)
+    dl = ["<h2>Downloads</h2><ul>"]
+    if (assets / "coverage_unmatched_top.csv").exists():
+        dl.append("<li><a href='data/coverage_unmatched_top.csv' download>coverage_unmatched_top.csv</a></li>")
+    if (assets / "top_services.csv").exists():
+        dl.append("<li><a href='data/top_services.csv' download>top_services.csv</a></li>")
+    if (assets / "top_edges.csv").exists():
+        dl.append("<li><a href='data/top_edges.csv' download>top_edges.csv</a></li>")
+    if debug_link_html: dl.append(debug_link_html)
+    dl.append("</ul>")
+    html.extend(dl)
+
+    # ---------- interpretation ----------
     html.append("<h2>Interpretation</h2><ul>"
-                "<li><b>Baseline — SemConv</b> uses OpenTelemetry messaging semantics only (PRODUCER/CONSUMER & messaging.*). "
-                "When the demo is fully instrumented, it should be near‑perfect.</li>"
-                "<li><b>Baseline — Timing</b> uses only timing/overlap. It can over‑label edges as async if median lag ≥ 0 and overlap is low.</li>"
-                "<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; when semantics are present it matches SemConv, "
-                "and when they are missing it should degrade gracefully.</li>"
+                "<li><b>Baseline — SemConv</b> uses OpenTelemetry messaging semantics only (PRODUCER/CONSUMER & messaging.*).</li>"
+                "<li><b>Baseline — Timing</b> uses only timing/overlap.</li>"
+                "<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; robust when one signal is missing.</li>"
                 "</ul>")
 
     html.append("</body></html>")
