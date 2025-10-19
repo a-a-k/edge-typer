@@ -31,15 +31,20 @@ def baseline_timing(feat_timing: pd.DataFrame) -> pd.DataFrame:
     return df[["src_service", "dst_service", "pred_label", "pred_score"]]
 
 
-def rule_labels(feat_semconv: pd.DataFrame, feat_timing: pd.DataFrame) -> pd.DataFrame:
-    # Select whatever timing cols exist; fill the rest later
-    base_cols = ["src_service", "dst_service"]
-    have = [c for c in ["median_lag_ns", "p_overlap", "p_nonneg_lag"] if c in feat_timing.columns]
-    right = feat_timing[base_cols + have].copy()
+def rule_labels_from_features(feats: pd.DataFrame) -> pd.DataFrame:
+    """
+    Take the merged features dataframe (one row per edge) and produce rule labels.
 
-    df = feat_semconv.merge(right, on=["src_service", "dst_service"], how="left")
+    Required columns (filled conservatively if missing):
+      p_messaging, link_ratio, median_lag_ns, p_overlap, p_nonneg_lag
+    """
+    df = feats.copy()
 
-    # Ensure required columns exist
+    # Ensure columns exist (conservative defaults)
+    if "p_messaging" not in df.columns:  # should exist
+        df["p_messaging"] = 0.0
+    if "link_ratio" not in df.columns:
+        df["link_ratio"] = 0.0
     if "median_lag_ns" not in df.columns:
         df["median_lag_ns"] = 0
     if "p_overlap" not in df.columns:
@@ -47,26 +52,22 @@ def rule_labels(feat_semconv: pd.DataFrame, feat_timing: pd.DataFrame) -> pd.Dat
     if "p_nonneg_lag" not in df.columns:
         df["p_nonneg_lag"] = (df["median_lag_ns"] >= 0).astype(float)
 
-    df = df.fillna({"median_lag_ns": 0, "p_overlap": 0.0, "p_nonneg_lag": 0.0})
-
+    # High-confidence rules
     def label_row(r):
-        # High-confidence async
+        # async if clear messaging OR clear "non-overlapping" timing
         if r["p_messaging"] >= 0.6 or (r["p_nonneg_lag"] >= 0.9 and r["p_overlap"] <= 0.1):
             return "async", "high"
-        # High-confidence sync
+        # sync if no messaging and strong overlap
         if r["p_messaging"] == 0.0 and r["p_overlap"] >= 0.6:
             return "sync", "high"
-        # Ambiguous
         return "unknown", "low"
 
     lab = df.apply(lambda r: label_row(r), axis=1, result_type="expand")
     df["rule_label"] = lab[0]
-    df["rule_conf"] = lab[1]
+    df["rule_conf"]  = lab[1]
+
     return df[
-        [
-            "src_service", "dst_service",
-            "rule_label", "rule_conf",
-            "p_messaging", "link_ratio", "median_lag_ns", "p_overlap", "p_nonneg_lag",
-        ]
+        ["src_service","dst_service","rule_label","rule_conf",
+         "p_messaging","link_ratio","median_lag_ns","p_overlap","p_nonneg_lag"]
     ]
 
