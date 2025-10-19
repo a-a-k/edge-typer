@@ -213,7 +213,36 @@ jobs:
           edgetyper eval --name "Baseline — Timing (dropped)" \
             --pred "${RUN_DIR}/pred_timing_masked.csv"  --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing_masked.json"
       
-          # Rebuild report: it auto-picks all metrics_*.json (both normal & masked)
+          # Robustness 2: drop Timing, then re-run all methods (rules-only by default)
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" \
+            --out "${RUN_DIR}/features_masktiming.parquet" --mask-timing
+      
+          edgetyper baseline --features "${RUN_DIR}/features_masktiming.parquet" --mode semconv \
+            --out "${RUN_DIR}/pred_semconv_masktiming.csv"
+          edgetyper baseline --features "${RUN_DIR}/features_masktiming.parquet" --mode timing  \
+            --out "${RUN_DIR}/pred_timing_masktiming.csv"
+          edgetyper label    --features "${RUN_DIR}/features_masktiming.parquet"              \
+            --out "${RUN_DIR}/pred_ours_masktiming.csv"   # rules-only (no ML fallback)
+      
+          edgetyper eval --name "EdgeTyper (ours) — Timing dropped" \
+            --pred "${RUN_DIR}/pred_ours_masktiming.csv" \
+            --features "${RUN_DIR}/features_masktiming.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --out "${RUN_DIR}/metrics_ours_masktiming.json"
+      
+          edgetyper eval --name "Baseline — SemConv (Timing dropped)" \
+            --pred "${RUN_DIR}/pred_semconv_masktiming.csv" \
+            --features "${RUN_DIR}/features_masktiming.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --out "${RUN_DIR}/metrics_semconv_masktiming.json"
+      
+          edgetyper eval --name "Baseline — Timing (Timing dropped)" \
+            --pred "${RUN_DIR}/pred_timing_masktiming.csv" \
+            --features "${RUN_DIR}/features_masktiming.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --out "${RUN_DIR}/metrics_timing_masktiming.json"
+      
+          # Rebuild the report (it will ingest all metrics_*.json)
           edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site"
 
 
