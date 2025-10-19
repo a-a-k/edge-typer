@@ -314,5 +314,32 @@ def report_cmd(metrics_dir: Path, outdir: Path) -> None:
     click.echo(f"[report] wrote {outdir / 'index.html'}")
 
 
+# ---------------- debug ----------------
+@main.command("debug")
+@click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--gt", "gt_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--pred", "pred_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
+@click.option("--out", "out_csv", type=click.Path(dir_okay=False, path_type=Path), required=True)
+def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_csv: Path) -> None:
+    feats = pd.read_parquet(features_path)
+    gt_df, is_yaml = _load_ground_truth(gt_path)
+    matched = _match_ground_truth(feats, gt_df, is_yaml=is_yaml)
+    # Join features for matched edges
+    cols = ["src_service","dst_service","p_messaging","link_ratio","median_lag_ns","p_overlap","p_nonneg_lag"]
+    df = matched.merge(feats[cols], on=["src_service","dst_service"], how="left")
+    # Add rule-only labels for visibility
+    from edgetyper.classify.rules import rule_labels_from_features
+    rules = rule_labels_from_features(feats)[["src_service","dst_service","rule_label","rule_conf"]]
+    df = df.merge(rules, on=["src_service","dst_service"], how="left")
+    # Optionally join predictions
+    if pred_path:
+        pred = pd.read_csv(pred_path)
+        df = df.merge(pred, on=["src_service","dst_service"], how="left")
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(out_csv, index=False)
+    click.echo(f"[debug] wrote {len(df)} matched edges with features → {out_csv}")
+
+
+# --------------------------------
 if __name__ == "__main__":
     main()
