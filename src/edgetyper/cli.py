@@ -24,7 +24,7 @@ from edgetyper.io.otlp_json import read_otlp_json
 from edgetyper.graph.build import build as build_graph
 from edgetyper.features.semconv import features_semconv
 from edgetyper.features.timing import features_timing
-from edgetyper.classify.rules import baseline_semconv, baseline_timing, rule_labels
+from edgetyper.classify.rules import baseline_semconv, baseline_timing, rule_labels_from_features
 from edgetyper.classify.model import label_with_fallback
 
 
@@ -117,7 +117,7 @@ def baseline_cmd(features_path: Path, mode: str, out_path: Path) -> None:
 @click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
 def label_cmd(features_path: Path, out_path: Path) -> None:
     feats = pd.read_parquet(features_path)
-    rules_df = rule_labels(feats, feats)  # timing already merged in feats
+    rules_df = rule_labels_from_features(feats)
     pred = label_with_fallback(rules_df)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pred.to_csv(out_path, index=False)
