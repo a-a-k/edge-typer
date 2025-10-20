@@ -275,20 +275,20 @@ jobs:
           edgetyper eval --name "Ours — physical" \
             --pred "${RUN_DIR}/pred_ours.csv" \
             --features "${RUN_DIR}/features.parquet" \
-            --gt "src/edgetyper/gt/ground_truth.yaml" \
+            --gt "src/edgetyper/ground_truth.yaml" \
             --out "${RUN_DIR}/metrics_ours_physical.json"
       
           # (Optional) keep baselines/robustness on the physical graph if you want
           edgetyper eval --name "Baseline — SemConv (physical)" \
             --pred "${RUN_DIR}/pred_semconv.csv" \
             --features "${RUN_DIR}/features.parquet" \
-            --gt "src/edgetyper/gt/ground_truth.yaml" \
+            --gt "src/edgetyper/ground_truth.yaml" \
             --out "${RUN_DIR}/metrics_semconv_physical.json"
       
           edgetyper eval --name "Baseline — Timing (physical)" \
             --pred "${RUN_DIR}/pred_timing.csv" \
             --features "${RUN_DIR}/features.parquet" \
-            --gt "src/edgetyper/gt/ground_truth.yaml" \
+            --gt "src/edgetyper/ground_truth.yaml" \
             --out "${RUN_DIR}/metrics_timing_physical.json"
       
           # Plan (IBS/DBS) on physical graph
@@ -312,7 +312,7 @@ jobs:
             --events   "${RUN_DIR}/events.parquet" \
             --edges    "${RUN_DIR}/edges.parquet" \
             --features "${RUN_DIR}/features.parquet" \
-            --gt       "src/edgetyper/gt/ground_truth.yaml" \
+            --gt       "src/edgetyper/ground_truth.yaml" \
             --coverage-top 30 \
             --provenance "${RUN_DIR}/provenance.json" \
             --assets-dir "site/data" \
