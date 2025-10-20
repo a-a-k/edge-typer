@@ -628,7 +628,17 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
               help="Comma-separated substrings to identify broker nodes.")
 def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alpha_ack: float, broker_tokens: str) -> None:
     import pandas as pd
+    from collections import defaultdict, deque
+  
     tok = {t.strip().lower() for t in broker_tokens.split(",") if t.strip()}
+      # --- helper to render top edges safely ---
+    def _fmt_top(df: pd.DataFrame, k: int = 5) -> str:
+        if df is None or df.empty:
+            return ""
+        cols = ["src_service", "dst_service", "w"]
+        df2 = df.loc[:, cols] if all(c in df.columns for c in cols) else df
+        head = df2.sort_values("w", ascending=False).head(k)
+        return "; ".join(f"{s}→{d} ({int(w)})" for s, d, w in head[cols].itertuples(index=False, name=None))
     def _norm(s: str) -> str:
         return "".join(ch for ch in s.lower() if ch.isalnum())
     def _is_broker(name: str) -> bool:
@@ -654,18 +664,19 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
     ga = g[g["etype"]=="ASYNC"][["src_service","dst_service","w"]].copy()
 
     # Reverse adjacency for BLOCKING edges (for upstream closure)
-    from collections import defaultdict, deque
     pre = defaultdict(set)
     for s,d,_ in gb.itertuples(index=False, name=None):
         pre[d].add(s)
 
+    pre = defaultdict(set)
+    for s, d, _ in gb.itertuples(index=False, name=None):
+        pre[d].add(s)
+
     nodes = sorted(set(g["src_service"]).union(g["dst_service"]))
-    rows = []
-    # Index for fast sums
-    import numpy as np
     gb_dst_groups = gb.groupby("dst_service")
     ga_dst_groups = ga.groupby("dst_service")
 
+    rows = []
     for v in nodes:
         # Upstream blocking closure U(v)
         U = set()
@@ -674,37 +685,32 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
             y = q.popleft()
             for u in pre.get(y, ()):
                 if u not in U and u != v:
-                    U.add(u)
-                    q.append(u)
+                    U.add(u); q.append(u)
 
-        # ---- IBS: blocking edges entering U(v)
+        # ---- IBS: blocking edges entering U(v) + broker ack term ----
+        gbU = gb.iloc[0:0]       # empty frame with schema
         ibs_block = 0.0
         if U:
             keys = [x for x in U if x in gb_dst_groups.groups]
             if keys:
                 gbU = pd.concat([gb_dst_groups.get_group(k) for k in keys], ignore_index=True)
                 ibs_block = float(gbU["w"].sum())
-        else:
-            # keep a valid empty for tops
-            gbU = gb.iloc[0:0]
-        
-        # broker ack term
+
         ibs_ack = 0.0
         if _is_broker(v) and v in ga_dst_groups.groups:
             ibs_ack = float(ga_dst_groups.get_group(v)["w"].sum()) * max(0.0, min(1.0, alpha_ack))
-        
+
         IBS = ibs_block + ibs_ack
-        
-        # ---- DBS: async edges entering I = U ∪ {v}
+
+        # ---- DBS: async edges entering I = U ∪ {v} ----
         I = set(U); I.add(v)
+        gaI = ga.iloc[0:0]       # empty frame with schema
         DBS = 0.0
         if I:
             keysI = [x for x in I if x in ga_dst_groups.groups]
             if keysI:
                 gaI = pd.concat([ga_dst_groups.get_group(k) for k in keysI], ignore_index=True)
                 DBS = float(gaI["w"].sum())
-        else:
-            gaI = ga.iloc[0:0]
 
         rows.append({
             "target": v,
@@ -712,15 +718,15 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
             "IBS": round(IBS, 3),
             "DBS": round(DBS, 3),
             "n_upstream_blocking": len(U),
-            "ib_edges_top": fmt_top(gbU_top),
-            "db_edges_top": fmt_top(gaI_top),
+            "ib_edges_top": _fmt_top(gbU),
+            "db_edges_top": _fmt_top(gaI),
         })
 
-    out = pd.DataFrame(rows).sort_values(["IBS","DBS"], ascending=False)
+    out = pd.DataFrame(rows).sort_values(["IBS", "DBS"], ascending=False)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
     click.echo(f"[plan] wrote plan for {len(out)} nodes → {out_path}")
-
+  
 
 # ---------------- observe ----------------
 @main.command("observe")
