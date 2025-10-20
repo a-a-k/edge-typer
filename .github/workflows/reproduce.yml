@@ -147,6 +147,48 @@ jobs:
           sleep "${SOAK_SECONDS}"
 
 
+      - name: Inject micro-faults (record segments)
+        env:
+          RUN_DIR: ${{ env.RUN_DIR }}
+        run: |
+          set -euo pipefail
+          to_ns() { date +%s%N; }
+      
+          # Baseline window (ensure load is running)
+          BASE_START=$(to_ns); sleep 15; BASE_END=$(to_ns)
+      
+          # Fault 1: stop consumer (fraud-detection) for 20s
+          CONS_START=$(to_ns)
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml stop fraud-detection
+          sleep 20
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml up -d fraud-detection
+          # Wait until healthy (retry up to ~45s)
+          for i in {1..15}; do
+            st=$(docker inspect -f '{{.State.Health.Status}}' otel-demo-fraud-detection-1 2>/dev/null || echo "unknown")
+            [ "$st" = "healthy" ] && break || sleep 3
+          done
+          CONS_END=$(to_ns)
+      
+          # Fault 2: pause broker (kafka) for 20s
+          BROK_START=$(to_ns)
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml pause kafka
+          sleep 20
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml unpause kafka
+          BROK_END=$(to_ns)
+      
+          mkdir -p "${RUN_DIR}"
+          cat > "${RUN_DIR}/segments.json" <<JSON
+          {
+            "segments": [
+              {"name":"baseline","start_ns": $BASE_START, "end_ns": $BASE_END},
+              {"name":"consumer_down","start_ns": $CONS_START, "end_ns": $CONS_END},
+              {"name":"broker_paused","start_ns": $BROK_START, "end_ns": $BROK_END}
+            ]
+          }
+          JSON
+          echo "Segments written to ${RUN_DIR}/segments.json"
+
+
       - name: Check that traces file exists
         run: |
           if [ ! -s "${RUN_DIR}/collector/otel-traces.json" ]; then
@@ -220,62 +262,57 @@ jobs:
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
 
 
-      - name: Evaluate (full semantics) + Report
+      - name: Evaluate (physical GT only) + Plan + Observe + Report
         run: |
-          # Full-semantics evaluation
-          edgetyper eval --name "EdgeTyper (ours)"   --pred "${RUN_DIR}/pred_ours.csv"    --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours.json"
-          edgetyper eval --name "Baseline — SemConv" --pred "${RUN_DIR}/pred_semconv.csv" --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv.json"
-          edgetyper eval --name "Baseline — Timing"  --pred "${RUN_DIR}/pred_timing.csv"  --features "${RUN_DIR}/features.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing.json"
-      
-          # Robustness: mask SemConv, then re-run all methods (rules-only by default)
-          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_masked.parquet" --mask-semconv
-          edgetyper baseline  --features "${RUN_DIR}/features_masked.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv_masked.csv"
-          edgetyper baseline  --features "${RUN_DIR}/features_masked.parquet" --mode timing  --out "${RUN_DIR}/pred_timing_masked.csv"
-          edgetyper label     --features "${RUN_DIR}/features_masked.parquet"              --out "${RUN_DIR}/pred_ours_masked.csv"   # rules-only (no ML)
-      
-          edgetyper eval --name "EdgeTyper (ours) — SemConv dropped" \
-            --pred "${RUN_DIR}/pred_ours_masked.csv"    --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_ours_masked.json"
-      
-          edgetyper eval --name "Baseline — SemConv (dropped)" \
-            --pred "${RUN_DIR}/pred_semconv_masked.csv" --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_semconv_masked.json"
-      
-          edgetyper eval --name "Baseline — Timing (dropped)" \
-            --pred "${RUN_DIR}/pred_timing_masked.csv"  --features "${RUN_DIR}/features_masked.parquet" --gt "src/edgetyper/ground_truth.yaml" --out "${RUN_DIR}/metrics_timing_masked.json"
-      
-          # Robustness 2: drop Timing, then re-run all methods (rules-only by default)
-          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" \
-            --out "${RUN_DIR}/features_masktiming.parquet" --mask-timing
-      
-          edgetyper baseline --features "${RUN_DIR}/features_masktiming.parquet" --mode semconv \
-            --out "${RUN_DIR}/pred_semconv_masktiming.csv"
-          edgetyper baseline --features "${RUN_DIR}/features_masktiming.parquet" --mode timing  \
-            --out "${RUN_DIR}/pred_timing_masktiming.csv"
-          edgetyper label    --features "${RUN_DIR}/features_masktiming.parquet"              \
-            --out "${RUN_DIR}/pred_ours_masktiming.csv"   # rules-only (no ML fallback)
-      
-          edgetyper eval --name "EdgeTyper (ours) — Timing dropped" \
-            --pred "${RUN_DIR}/pred_ours_masktiming.csv" \
-            --features "${RUN_DIR}/features_masktiming.parquet" \
-            --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_ours_masktiming.json"
-      
-          edgetyper eval --name "Baseline — SemConv (Timing dropped)" \
-            --pred "${RUN_DIR}/pred_semconv_masktiming.csv" \
-            --features "${RUN_DIR}/features_masktiming.parquet" \
-            --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_semconv_masktiming.json"
-      
-          edgetyper eval --name "Baseline — Timing (Timing dropped)" \
-            --pred "${RUN_DIR}/pred_timing_masktiming.csv" \
-            --features "${RUN_DIR}/features_masktiming.parquet" \
-            --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_timing_masktiming.json"
-      
-          # Rebuild the report (it will ingest all metrics_*.json)
-          edgetyper report --metrics-dir "${RUN_DIR}" --outdir "site" \
+          # Evaluate (physical)
+          edgetyper eval --name "Ours — physical" \
+            --pred "${RUN_DIR}/pred_ours.csv" \
             --features "${RUN_DIR}/features.parquet" \
-            --gt "src/edgetyper/ground_truth.yaml" \
-            --coverage-top 30
+            --gt "src/edgetyper/gt/ground_truth_physical.yaml" \
+            --out "${RUN_DIR}/metrics_ours_physical.json"
+      
+          # (Optional) keep baselines/robustness on the physical graph if you want
+          edgetyper eval --name "Baseline — SemConv (physical)" \
+            --pred "${RUN_DIR}/pred_semconv.csv" \
+            --features "${RUN_DIR}/features.parquet" \
+            --gt "src/edgetyper/gt/ground_truth_physical.yaml" \
+            --out "${RUN_DIR}/metrics_semconv_physical.json"
+      
+          edgetyper eval --name "Baseline — Timing (physical)" \
+            --pred "${RUN_DIR}/pred_timing.csv" \
+            --features "${RUN_DIR}/features.parquet" \
+            --gt "src/edgetyper/gt/ground_truth_physical.yaml" \
+            --out "${RUN_DIR}/metrics_timing_physical.json"
+      
+          # Plan (IBS/DBS) on physical graph
+          edgetyper plan \
+            --edges "${RUN_DIR}/edges.parquet" \
+            --pred  "${RUN_DIR}/pred_ours.csv" \
+            --out   "${RUN_DIR}/plan_physical.csv" \
+            --weight events --alpha-ack 1.0
+      
+          # Live observer (spans vs segments)
+          edgetyper observe \
+            --spans    "${RUN_DIR}/spans.parquet" \
+            --segments "${RUN_DIR}/segments.json" \
+            --out      "${RUN_DIR}/observations.json"
+      
+          # Enriched report (brokers included by default)
+          edgetyper report \
+            --metrics-dir "${RUN_DIR}" \
+            --outdir "site" \
+            --spans    "${RUN_DIR}/spans.parquet" \
+            --events   "${RUN_DIR}/events.parquet" \
+            --edges    "${RUN_DIR}/edges.parquet" \
+            --features "${RUN_DIR}/features.parquet" \
+            --gt       "src/edgetyper/gt/ground_truth_physical.yaml" \
+            --coverage-top 30 \
+            --provenance "${RUN_DIR}/provenance.json" \
+            --assets-dir "site/data" \
+            --count-mode pred \
+            --include-brokers \
+            --plan "${RUN_DIR}/plan_physical.csv" \
+            --live "${RUN_DIR}/observations.json"
 
 
       - name: Debug table (matched edges + features)
