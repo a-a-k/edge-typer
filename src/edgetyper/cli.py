@@ -274,6 +274,12 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
               type=click.Choice(["pred", "gt", "both"], case_sensitive=False),
               default="pred", show_default=True,
               help="Which counts to show in the metrics table: predicted by each run, ground truth, or both.")
+@click.option("--plan", "plan_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional chaos plan CSV to embed.")
+@click.option("--live", "live_json", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional live observations JSON to embed.")
+@click.option("--include-brokers", is_flag=True, default=True,
+              help="Include broker edges (e.g., kafka) in coverage.")
 def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
                edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
                prov_path: Path | None, assets_dir: Path | None, count_mode: str) -> None:
@@ -379,7 +385,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             n = _normalize_service_name(name)
             tokens = {"otelcollector","otelcol","otel","jaeger","opensearch",
                       "grafana","prometheus","loki","tempo","zookeeper",
-                      "kafka","kafkaui","ui","loadgenerator","locust","frontendproxy"}
+                      "kafkaui","ui","loadgenerator","locust","frontendproxy"} # Note: no 'kafka' in tokens => brokers INCLUDED by default
             return any(t in n for t in tokens)
 
         cand = feats_df[["src_service","dst_service","n_events","n_rpc","n_messaging"]].drop_duplicates()
@@ -548,6 +554,42 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
                 "<li><b>Baseline — Timing</b> uses only timing/overlap.</li>"
                 "<li><b>EdgeTyper (ours)</b> combines SemConv with timing and span links; robust when one signal is missing.</li>"
                 "</ul>")
+                 
+    # ---- Chaos plan (if provided)
+    if plan_csv:
+        import pandas as pd
+        plan_df = pd.read_csv(plan_csv)
+        plan_df = plan_df.sort_values(["IBS","DBS"], ascending=False)
+        (assets / "plan_physical.csv").write_text(plan_df.to_csv(index=False))
+        rows = ""
+        for i, r in enumerate(plan_df.head(10).itertuples(index=False), 1):
+            rows += (f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
+                     f"<td>{r.IBS:.1f}</td><td>{r.DBS:.1f}</td>"
+                     f"<td>{(r.ib_edges_top or '')}</td><td>{(r.db_edges_top or '')}</td></tr>")
+        html.append("<h2>Chaos plan (draft, physical graph)</h2>"
+                    "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
+                    "<th>IBS</th><th>DBS</th><th>Top blocking contributors</th><th>Top async contributors</th>"
+                    "</tr></thead><tbody>"+rows+"</tbody></table>"
+                    "<p><a href='data/plan_physical.csv' download>Download plan_physical.csv</a></p>")
+    
+    # ---- Live sanity (if provided)
+    if live_json:
+        import json
+        live = json.loads(Path(live_json).read_text())
+        if live.get("ok"):
+            html.append("<h2>Live sanity (micro‑faults)</h2>")
+            html.append("<ul>")
+            for seg in live.get("segments", []):
+                html.append(f"<li><b>{seg['name']}</b>: total spans={seg['total_spans']}, kinds={seg.get('by_kind',{})}</li>")
+            html.append("</ul>")
+            # save as downloadable
+            import shutil
+            dst = assets / "observations.json"
+            try:
+                shutil.copyfile(live_json, dst)
+                html.append("<p><a href='data/observations.json' download>observations.json</a></p>")
+            except Exception:
+                pass
 
     html.append("</body></html>")
     (outdir / "index.html").write_text("\n".join(html))
@@ -578,6 +620,172 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
     click.echo(f"[debug] wrote {len(df)} matched edges with features → {out_csv}")
+
+
+# ---------------- plan ----------------
+@main.command("plan")
+@click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--pred",  "pred_path",  type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--out",   "out_path",   type=click.Path(dir_okay=False,  path_type=Path),           required=True)
+@click.option("--weight", type=click.Choice(["events","rpc","messaging"], case_sensitive=False), default="events",
+              show_default=True, help="Edge weight to aggregate.")
+@click.option("--alpha-ack", type=float, default=1.0, show_default=True,
+              help="Immediate producer impact fraction if the target is a broker (0..1).")
+@click.option("--broker-tokens", type=str, default="kafka,zookeeper", show_default=True,
+              help="Comma-separated substrings to identify broker nodes.")
+def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alpha_ack: float, broker_tokens: str) -> None:
+    import pandas as pd
+    tok = {t.strip().lower() for t in broker_tokens.split(",") if t.strip()}
+    def _norm(s: str) -> str:
+        return "".join(ch for ch in s.lower() if ch.isalnum())
+    def _is_broker(name: str) -> bool:
+        n = _norm(str(name))
+        return any(t in n for t in tok)
+
+    edges = pd.read_parquet(edges_path)
+    preds = pd.read_csv(pred_path)
+
+    # Join predicted labels onto edges
+    g = edges.merge(preds[["src_service","dst_service","pred_label"]],
+                    on=["src_service","dst_service"], how="left")
+    g["etype"] = g["pred_label"].str.lower().map({"async":"ASYNC","sync":"BLOCKING"})
+    g = g.dropna(subset=["etype"]).copy()
+
+    wcol = {"events":"n_events","rpc":"n_rpc","messaging":"n_messaging"}[weight.lower()]
+    if wcol not in g.columns:
+        raise click.ClickException(f"Weight column '{wcol}' not present in {edges_path}")
+    g["w"] = g[wcol].fillna(0).astype(float)
+
+    # Split by type
+    gb = g[g["etype"]=="BLOCKING"][["src_service","dst_service","w"]].copy()
+    ga = g[g["etype"]=="ASYNC"][["src_service","dst_service","w"]].copy()
+
+    # Reverse adjacency for BLOCKING edges (for upstream closure)
+    from collections import defaultdict, deque
+    pre = defaultdict(set)
+    for s,d,_ in gb.itertuples(index=False, name=None):
+        pre[d].add(s)
+
+    nodes = sorted(set(g["src_service"]).union(g["dst_service"]))
+    rows = []
+    # Index for fast sums
+    import numpy as np
+    gb_dst_groups = gb.groupby("dst_service")
+    ga_dst_groups = ga.groupby("dst_service")
+
+    for v in nodes:
+        # Upstream blocking closure U(v)
+        U = set()
+        q = deque([v])
+        while q:
+            y = q.popleft()
+            for u in pre.get(y, ()):
+                if u not in U and u != v:
+                    U.add(u)
+                    q.append(u)
+
+        # IBS: sum of blocking edges entering U, plus broker producer-ack term
+        if U:
+            gbU = gb_dst_groups.get_group(list(U)[0:1][0]).iloc[0:0]  # empty frame of same schema
+            # concat groups efficiently
+            parts = [gb_dst_groups.get_group(x) for x in U if x in gb_dst_groups.groups]
+            gbU = pd.concat(parts, ignore_index=True) if parts else gbU
+            ibs_block = float(gbU["w"].sum())
+        else:
+            ibs_block = 0.0
+
+        ibs_ack = 0.0
+        if _is_broker(v) and v in ga_dst_groups.groups:
+            ibs_ack = float(ga_dst_groups.get_group(v)["w"].sum()) * max(0.0, min(1.0, alpha_ack))
+
+        IBS = ibs_block + ibs_ack
+
+        # DBS: async edges entering I = U ∪ {v}
+        I = set(U)
+        I.add(v)
+        if I:
+            gaI = ga_dst_groups.get_group(list(I)[0:1][0]).iloc[0:0]
+            parts = [ga_dst_groups.get_group(x) for x in I if x in ga_dst_groups.groups]
+            gaI = pd.concat(parts, ignore_index=True) if parts else gaI
+            DBS = float(gaI["w"].sum())
+        else:
+            DBS = 0.0
+
+        # Top contributors (for transparency)
+        def fmt_top(df, k=5):
+            if df.empty: return ""
+            t = (df.sort_values("w", ascending=False).head(k)
+                   .apply(lambda r: f"{r['src_service']}→{r['dst_service']} ({int(r['w'])})", axis=1))
+            return "; ".join(t.tolist())
+
+        # Build small frames for tops
+        gbU_top = gbU if U else gb.iloc[0:0]
+        gaI_top = gaI if I else ga.iloc[0:0]
+
+        rows.append({
+            "target": v,
+            "kind": "broker" if _is_broker(v) else "app",
+            "IBS": round(IBS, 3),
+            "DBS": round(DBS, 3),
+            "n_upstream_blocking": len(U),
+            "ib_edges_top": fmt_top(gbU_top),
+            "db_edges_top": fmt_top(gaI_top),
+        })
+
+    out = pd.DataFrame(rows).sort_values(["IBS","DBS"], ascending=False)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_path, index=False)
+    click.echo(f"[plan] wrote plan for {len(out)} nodes → {out_path}")
+
+
+# ---------------- observe ----------------
+@main.command("observe")
+@click.option("--spans",    "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--segments", "segments_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True,
+              help="JSON with segments: [{name,start_ns,end_ns}, ...]")
+@click.option("--out",      "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
+def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
+    import json, pandas as pd
+    spans = pd.read_parquet(spans_path)
+    segs  = json.loads(Path(segments_path).read_text())
+
+    # Flexible field detection
+    ts_candidates = [c for c in ["start_time_unix_nano","start_unix_nano","start_ns","time_unix_nano"] if c in spans.columns]
+    kind_candidates = [c for c in ["span_kind","kind","kind_name"] if c in spans.columns]
+    svc = "service_name" if "service_name" in spans.columns else None
+    if not ts_candidates or not svc:
+        out_path.write_text(json.dumps({"ok": False, "reason": "timestamps_or_service_missing"}, indent=2))
+        click.echo("[observe] timestamps or service_name missing; wrote stub JSON.")
+        return
+
+    ts = ts_candidates[0]
+    spans["_ts"] = pd.to_numeric(spans[ts], errors="coerce")
+    spans = spans.dropna(subset=["_ts"]).copy()
+
+    if kind_candidates:
+        kind_col = kind_candidates[0]
+        spans["_kind"] = spans[kind_col].astype(str).str.upper()
+    else:
+        spans["_kind"] = "UNKNOWN"
+
+    result = {"ok": True, "ts_field": ts, "segments": []}
+    for seg in segs.get("segments", []):
+        name = seg.get("name")
+        s, e = int(seg.get("start_ns", 0)), int(seg.get("end_ns", 0))
+        df = spans[(spans["_ts"] >= s) & (spans["_ts"] <= e)]
+        total = int(len(df))
+        by_service = (df.groupby(svc).size().sort_values(ascending=False).head(12).to_dict())
+        by_kind = (df.groupby("_kind").size().sort_values(ascending=False).to_dict())
+        result["segments"].append({
+            "name": name, "start_ns": s, "end_ns": e,
+            "total_spans": total,
+            "by_service_top": by_service,
+            "by_kind": by_kind,
+        })
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(result, indent=2))
+    click.echo(f"[observe] wrote {out_path}")
 
 
 # --------------------------------
