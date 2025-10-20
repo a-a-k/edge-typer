@@ -38,14 +38,20 @@ def main() -> None:
 @main.command("extract")
 @click.option("--input", "input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--out",   "out_path",   type=click.Path(dir_okay=False,        path_type=Path), required=True)
-def extract_cmd(input_path: Path, out_path: Path, **_ignore):  # ← tolerate stray options
+def extract_cmd(input_path: Path, out_path: Path, **_ignore):
     """
     Parse OTLP-JSON into spans.parquet.
-    Any unknown CLI kwargs are safely ignored (for robustness against global options).
     """
-    events = _read_otlp_json(input_path)              # whatever your implementation is
-    _write_parquet(events, out_path)
-    click.echo(f"[extract] wrote {out_path}")
+    try:
+        from edgetyper.extract import read_otlp_json  # preferred location in this repo
+    except Exception:
+        # Some repos place it under edgetyper.io; try that as well.
+        from edgetyper.io import read_otlp_json
+
+    spans_df = read_otlp_json(input_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    spans_df.to_parquet(out_path, index=False)
+    click.echo(f"[extract] wrote {len(spans_df)} spans → {out_path}")
 
 
 # ---------------- graph ----------------
