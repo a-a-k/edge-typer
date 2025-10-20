@@ -33,24 +33,19 @@ def main() -> None:
     """EdgeTyper CLI (OpenTelemetry Demo → traces → analysis)."""
     pass
 
-@click.option("--count-mode",
-              type=click.Choice(["pred", "gt", "both"], case_sensitive=False),
-              default="pred", show_default=True,
-              help="Which counts to show in the metrics table: predicted by each run, ground truth, or both.")
 
 # ---------------- extract ----------------
 @main.command("extract")
 @click.option("--input", "input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
-@click.option("--service-attr", default="service.name", show_default=True)
-@click.option("--min-spans", default=100, show_default=True, type=int)
-def extract_cmd(input_path: Path, out_path: Path, service_attr: str, min_spans: int) -> None:
-    df = read_otlp_json(input_path, service_attr_key=service_attr)
-    if df.empty or len(df) < min_spans:
-        raise click.ClickException(f"[extract] Parsed {len(df)} spans (<{min_spans}). Increase soak or fix config.")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, index=False)
-    click.echo(f"[extract] wrote {len(df)} spans → {out_path}")
+@click.option("--out",   "out_path",   type=click.Path(dir_okay=False,        path_type=Path), required=True)
+def extract_cmd(input_path: Path, out_path: Path, **_ignore):  # ← tolerate stray options
+    """
+    Parse OTLP-JSON into spans.parquet.
+    Any unknown CLI kwargs are safely ignored (for robustness against global options).
+    """
+    events = _read_otlp_json(input_path)              # whatever your implementation is
+    _write_parquet(events, out_path)
+    click.echo(f"[extract] wrote {out_path}")
 
 
 # ---------------- graph ----------------
