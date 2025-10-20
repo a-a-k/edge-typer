@@ -1,14 +1,3 @@
-"""
-EdgeTyper CLI
-Stages:
-  - extract:   read OTLP-JSON traces → spans.parquet
-  - graph:     spans.parquet → events.parquet + edges.parquet
-  - featurize: events+edges → features.parquet
-  - baseline:  features → predictions (semconv|timing)
-  - label:     features → predictions (rules + ML fallback)
-  - eval:      predictions + ground_truth.(yaml|csv) → metrics.json
-  - report:    aggregate metrics (directory) → site/ (static HTML)
-"""
 from __future__ import annotations
 
 import json
@@ -192,7 +181,7 @@ def _match_ground_truth(edges_df: pd.DataFrame, gt_df: pd.DataFrame, is_yaml: bo
         rows = []
         for _, e in edges_df[["src_service", "dst_service"]].drop_duplicates().iterrows():
             for _, g in gt_df.iterrows():
-                if g["src_re"].search(str(e["src_service"])) and g["dst_re"].search(str(e["dst_service"])):
+                if g["src_re"].search(str(e["src_service"])) and g["dst_re"].search(str(e["dst_service"])):  # noqa: E501
                     rows.append({"src_service": e["src_service"], "dst_service": e["dst_service"], "gt_label": g["label"]})
                     break
         return pd.DataFrame(rows)
@@ -275,7 +264,8 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
               help="Include broker edges (e.g., kafka) in coverage.")
 def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
                edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
-               prov_path: Path | None, assets_dir: Path | None, count_mode: str) -> None:
+               prov_path: Path | None, assets_dir: Path | None, count_mode: str,
+               plan_csv: Path | None, live_json: Path | None, include_brokers: bool) -> None:
     import re, shutil
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -378,7 +368,9 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             n = _normalize_service_name(name)
             tokens = {"otelcollector","otelcol","otel","jaeger","opensearch",
                       "grafana","prometheus","loki","tempo","zookeeper",
-                      "kafkaui","ui","loadgenerator","locust","frontendproxy"} # Note: no 'kafka' in tokens => brokers INCLUDED by default
+                      "kafkaui","ui","loadgenerator","locust","frontendproxy"}
+            if not include_brokers:
+                tokens.update({"kafka","zookeeper"})
             return any(t in n for t in tokens)
 
         cand = feats_df[["src_service","dst_service","n_events","n_rpc","n_messaging"]].drop_duplicates()
@@ -393,6 +385,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         )
         (assets / "coverage_unmatched_top.csv").write_text(unmatched.to_csv(index=False))
 
+        ignored_text = "infra edges" if include_brokers else "infra/broker edges"
         rows = "".join(
             f"<tr><td>{i+1}</td><td>{r.src_service} → {r.dst_service}</td>"
             f"<td>{int(r.n_events)}</td><td>{int(r.n_rpc)}</td><td>{int(r.n_messaging)}</td></tr>"
@@ -401,7 +394,7 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         coverage_html = (
             "<h2>Ground‑truth coverage</h2>"
             f"<p>Matched <b>{n_matched}</b> of <b>{n_total}</b> discovered <i>app‑level</i> edges "
-            f"(<b>{pct:.1f}%</b>) after ignoring infra/broker edges.</p>"
+            f"(<b>{pct:.1f}%</b>) after ignoring {ignored_text}.</p>"
             "<p>Top unmatched edges by event volume:</p>"
             "<table><thead><tr><th>#</th><th>Edge</th><th>events</th><th>rpc</th><th>messaging</th></tr></thead><tbody>"
             f"{rows}</tbody></table>"
@@ -550,14 +543,13 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
                  
     # ---- Chaos plan (if provided)
     if plan_csv:
-        import pandas as pd
         plan_df = pd.read_csv(plan_csv)
         plan_df = plan_df.sort_values(["IBS","DBS"], ascending=False)
         (assets / "plan_physical.csv").write_text(plan_df.to_csv(index=False))
         rows = ""
         for i, r in enumerate(plan_df.head(10).itertuples(index=False), 1):
             rows += (f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
-                     f"<td>{r.IBS:.1f}</td><td>{r.DBS:.1f}</td>"
+                     f"<td>{(r.IBS):.1f}</td><td>{(r.DBS):.1f}</td>"
                      f"<td>{(r.ib_edges_top or '')}</td><td>{(r.db_edges_top or '')}</td></tr>")
         html.append("<h2>Chaos plan (draft, physical graph)</h2>"
                     "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
@@ -567,7 +559,6 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     
     # ---- Live sanity (if provided)
     if live_json:
-        import json
         live = json.loads(Path(live_json).read_text())
         if live.get("ok"):
             html.append("<h2>Live sanity (micro‑faults)</h2>")
@@ -575,10 +566,9 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             for seg in live.get("segments", []):
                 html.append(f"<li><b>{seg['name']}</b>: total spans={seg['total_spans']}, kinds={seg.get('by_kind',{})}</li>")
             html.append("</ul>")
-            # save as downloadable
-            import shutil
             dst = assets / "observations.json"
             try:
+                import shutil
                 shutil.copyfile(live_json, dst)
                 html.append("<p><a href='data/observations.json' download>observations.json</a></p>")
             except Exception:
@@ -627,20 +617,20 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
 @click.option("--broker-tokens", type=str, default="kafka,zookeeper", show_default=True,
               help="Comma-separated substrings to identify broker nodes.")
 def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alpha_ack: float, broker_tokens: str) -> None:
-    import pandas as pd
     from collections import defaultdict, deque
-  
+
     tok = {t.strip().lower() for t in broker_tokens.split(",") if t.strip()}
-      # --- helper to render top edges safely ---
+
     def _fmt_top(df: pd.DataFrame, k: int = 5) -> str:
         if df is None or df.empty:
             return ""
         cols = ["src_service", "dst_service", "w"]
-        df2 = df.loc[:, cols] if all(c in df.columns for c in cols) else df
-        head = df2.sort_values("w", ascending=False).head(k)
-        return "; ".join(f"{s}→{d} ({int(w)})" for s, d, w in head[cols].itertuples(index=False, name=None))
+        head = df.loc[:, cols].sort_values("w", ascending=False).head(k)
+        return "; ".join(f"{s}→{d} ({int(w)})" for s, d, w in head.itertuples(index=False, name=None))
+
     def _norm(s: str) -> str:
         return "".join(ch for ch in s.lower() if ch.isalnum())
+
     def _is_broker(name: str) -> bool:
         n = _norm(str(name))
         return any(t in n for t in tok)
@@ -665,10 +655,6 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
 
     # Reverse adjacency for BLOCKING edges (for upstream closure)
     pre = defaultdict(set)
-    for s,d,_ in gb.itertuples(index=False, name=None):
-        pre[d].add(s)
-
-    pre = defaultdict(set)
     for s, d, _ in gb.itertuples(index=False, name=None):
         pre[d].add(s)
 
@@ -685,7 +671,8 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
             y = q.popleft()
             for u in pre.get(y, ()):
                 if u not in U and u != v:
-                    U.add(u); q.append(u)
+                    U.add(u)
+                    q.append(u)
 
         # ---- IBS: blocking edges entering U(v) + broker ack term ----
         gbU = gb.iloc[0:0]       # empty frame with schema
@@ -703,7 +690,8 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
         IBS = ibs_block + ibs_ack
 
         # ---- DBS: async edges entering I = U ∪ {v} ----
-        I = set(U); I.add(v)
+        I = set(U)
+        I.add(v)
         gaI = ga.iloc[0:0]       # empty frame with schema
         DBS = 0.0
         if I:
@@ -726,7 +714,7 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(out_path, index=False)
     click.echo(f"[plan] wrote plan for {len(out)} nodes → {out_path}")
-  
+
 
 # ---------------- observe ----------------
 @main.command("observe")
@@ -735,7 +723,6 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
               help="JSON with segments: [{name,start_ns,end_ns}, ...]")
 @click.option("--out",      "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
 def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
-    import json, pandas as pd
     spans = pd.read_parquet(spans_path)
     segs  = json.loads(Path(segments_path).read_text())
 
