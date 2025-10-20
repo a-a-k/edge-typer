@@ -39,6 +39,13 @@ jobs:
           pip install -e .[dev]
 
 
+      - name: Sanity via CLI help
+        run: |
+          edgetyper --help
+          edgetyper report --help
+          edgetyper extract --help
+
+
       - name: Sanity (edgetyper import works)
         run: |
           python - <<'PY'
