@@ -1,96 +1,40 @@
-# Ground Truth model for the OpenTelemetry Demo architecture.
-# This model is formalized by analyzing the source code and communication patterns (best-effort).
+# Ground truth (physical graph) for OpenTelemetry Demo
+# Schema preserved: links: [{source, target, type, protocol}]
+# Types: ASYNC (messaging) | BLOCKING (RPC)
+# Protocols: kafka | http | grpc
 
 links:
-  # Frontend synchronous calls (typical gRPC/HTTP)
-  - source: frontend
-    target: adservice
-    type: BLOCKING # gRPC
-  - source: frontend
-    target: productcatalogservice
-    type: BLOCKING # gRPC
-  - source: frontend
-    target: recommendationservice
-    type: BLOCKING # gRPC
-  - source: frontend
-    target: cartservice
-    type: BLOCKING # gRPC
-  - source: frontend
-    target: checkoutservice
-    type: BLOCKING # gRPC
+  # --- Kafka messaging (producer & consumers) ---
+  - { source: checkout,  target: kafka,            type: ASYNC,    protocol: kafka }
+  - { source: kafka,     target: accounting,       type: ASYNC,    protocol: kafka }
+  - { source: kafka,     target: fraud-detection,  type: ASYNC,    protocol: kafka }
 
-  # Checkout orchestrates calls to multiple backends
-  - source: checkoutservice
-    target: cartservice
-    type: BLOCKING # gRPC
-  - source: checkoutservice
-    target: productcatalogservice
-    type: BLOCKING # gRPC
-  - source: checkoutservice
-    target: currencyservice
-    type: BLOCKING # gRPC
-  - source: checkoutservice
-    target: paymentservice
-    type: BLOCKING # HTTP/gRPC
-  - source: checkoutservice
-    target: shippingservice
-    type: BLOCKING # gRPC
-  - source: checkoutservice
-    target: emailservice
-    type: BLOCKING # HTTP
+  # --- Reverse proxy hop (RPC sync) ---
+  - { source: frontend-proxy, target: frontend,    type: BLOCKING, protocol: http }
 
-  # Recommendation depends on catalog
-  - source: recommendationservice
-    target: productcatalogservice
-    type: BLOCKING # gRPC
+  # --- Frontend RPCs (browse/cart/checkout paths) ---
+  - { source: frontend,  target: product-catalog,  type: BLOCKING, protocol: http }
+  - { source: frontend,  target: cart,             type: BLOCKING, protocol: grpc }
+  - { source: frontend,  target: recommendation,   type: BLOCKING, protocol: grpc }
+  - { source: frontend,  target: ad,               type: BLOCKING, protocol: grpc }
+  - { source: frontend,  target: checkout,         type: BLOCKING, protocol: grpc }
+  - { source: frontend,  target: image-provider,   type: BLOCKING, protocol: http }
 
-  # Storage backends
-  - source: cartservice
-    target: redis
-    type: BLOCKING # Redis
-  - source: productcatalogservice
-    target: postgres
-    type: BLOCKING # PostgreSQL
+  # --- Checkout orchestration (RPC sync) ---
+  - { source: checkout,  target: cart,             type: BLOCKING, protocol: grpc }
+  - { source: checkout,  target: payment,          type: BLOCKING, protocol: http }
+  - { source: checkout,  target: shipping,         type: BLOCKING, protocol: grpc }
+  - { source: checkout,  target: currency,         type: BLOCKING, protocol: grpc }
 
-  # Async processing via Kafka (producers and consumers)
-  - source: checkoutservice
-    target: kafka
-    type: ASYNC # Kafka Producer: orders
-  - source: kafka
-    target: orderprocessingservice
-    type: ASYNC # Kafka Consumer: orders
-  - source: kafka
-    target: frauddetectionservice
-    type: ASYNC # Kafka Consumer: orders
+  # --- Shipping to Quote (RPC sync) ---
+  - { source: shipping,  target: quote,            type: BLOCKING, protocol: http }
 
-  - source: orderprocessingservice
-    target: kafka
-    type: ASYNC # Kafka Producer: shipments
-  - source: kafka
-    target: shippingservice
-    type: ASYNC # Kafka Consumer: shipments
-
-  - source: paymentservice
-    target: kafka
-    type: ASYNC # Kafka Producer: payments
-  - source: kafka
-    target: accountingservice
-    type: ASYNC # Kafka Consumer: payments
-
-  # Quotes flow (demo often includes a quote path)
-  - source: quoteservice
-    target: kafka
-    type: ASYNC # Kafka Producer: quotes
-  - source: kafka
-    target: quoteservice
-    type: ASYNC # Kafka Consumer: quotes-requests
-
-  # Feature flags (often HTTP/gRPC)
-  - source: frontend
-    target: featureflagservice
-    type: BLOCKING # HTTP
-
-  # Misc possible synchronous edges
-  - source: shippingservice
-    target: emailservice
-    type: BLOCKING # HTTP (notify shipment)
+  # --- Additional stable RPCs often observed (kept to reach full coverage) ---
+  - { source: frontend,  target: currency,         type: BLOCKING, protocol: grpc }
+  - { source: recommendation, target: product-catalog, type: BLOCKING, protocol: grpc }
+  - { source: ad,        target: product-catalog,  type: BLOCKING, protocol: grpc }
+  - { source: payment,   target: currency,         type: BLOCKING, protocol: http }
+  - { source: product-catalog, target: currency,   type: BLOCKING, protocol: http }
+  - { source: cart,      target: flagd,            type: BLOCKING, protocol: http }
+  - { source: shipping,  target: currency,         type: BLOCKING, protocol: grpc }
+  - { source: frontend,  target: flagd,            type: BLOCKING, protocol: http }
