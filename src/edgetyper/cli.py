@@ -678,38 +678,33 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
                     q.append(u)
 
         # ---- IBS: blocking edges entering U(v)
+        ibs_block = 0.0
         if U:
-            gbU = gb.iloc[0:0]  # empty frame with same columns as gb
             keys = [x for x in U if x in gb_dst_groups.groups]
             if keys:
-                gbU = pd.concat([gb_dst_groups.get_group(k) for k in keys],
-                                ignore_index=True)
-            ibs_block = float(gbU["w"].sum())
+                gbU = pd.concat([gb_dst_groups.get_group(k) for k in keys], ignore_index=True)
+                ibs_block = float(gbU["w"].sum())
         else:
-            ibs_block = 0.0
+            # keep a valid empty for tops
+            gbU = gb.iloc[0:0]
+        
+        # broker ack term
+        ibs_ack = 0.0
+        if _is_broker(v) and v in ga_dst_groups.groups:
+            ibs_ack = float(ga_dst_groups.get_group(v)["w"].sum()) * max(0.0, min(1.0, alpha_ack))
+        
+        IBS = ibs_block + ibs_ack
         
         # ---- DBS: async edges entering I = U ∪ {v}
         I = set(U); I.add(v)
+        DBS = 0.0
         if I:
-            gaI = ga.iloc[0:0]  # empty frame with same columns as ga
-            keys = [x for x in I if x in ga_dst_groups.groups]
-            if keys:
-                gaI = pd.concat([ga_dst_groups.get_group(k) for k in keys],
-                                ignore_index=True)
-            DBS = float(gaI["w"].sum())
+            keysI = [x for x in I if x in ga_dst_groups.groups]
+            if keysI:
+                gaI = pd.concat([ga_dst_groups.get_group(k) for k in keysI], ignore_index=True)
+                DBS = float(gaI["w"].sum())
         else:
-            DBS = 0.0
-
-        # Top contributors (for transparency)
-        def fmt_top(df, k=5):
-            if df.empty: return ""
-            t = (df.sort_values("w", ascending=False).head(k)
-                   .apply(lambda r: f"{r['src_service']}→{r['dst_service']} ({int(r['w'])})", axis=1))
-            return "; ".join(t.tolist())
-
-        # Build small frames for tops
-        gbU_top = gbU if U else gb.iloc[0:0]
-        gaI_top = gaI if I else ga.iloc[0:0]
+            gaI = ga.iloc[0:0]
 
         rows.append({
             "target": v,
