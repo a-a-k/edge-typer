@@ -295,9 +295,14 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         return "full"
 
     def method_of(name: str) -> str:
-        if "EdgeTyper (ours)" in name: return "ours"
-        if "SemConv" in name:          return "semconv"
-        return "timing"
+        s = name.lower()
+        if "ours" in s or "edgetyper" in s:
+            return "ours"
+        if "semconv" in s:
+            return "semconv"
+        if "timing" in s:
+            return "timing"
+        return "ours"  # safe fallback so we don’t lose rows
 
     dedup = {}
     for m in items:
@@ -368,13 +373,27 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             n = _normalize_service_name(name)
             tokens = {"otelcollector","otelcol","otel","jaeger","opensearch",
                       "grafana","prometheus","loki","tempo","zookeeper",
-                      "kafkaui","ui","loadgenerator","locust","frontendproxy"}
+                      "kafkaui","ui","loadgenerator","locust","frontendproxy",
+                      "flagd","email"}
             if not include_brokers:
                 tokens.update({"kafka","zookeeper"})
             return any(t in n for t in tokens)
 
         cand = feats_df[["src_service","dst_service","n_events","n_rpc","n_messaging"]].drop_duplicates()
         cand = cand[~cand["src_service"].map(_is_infra) & ~cand["dst_service"].map(_is_infra)]
+        is_rpc = cand["n_rpc"] > 0
+        if include_brokers:
+            # physical messaging only: must touch the broker
+            is_msg_phys = (cand["n_messaging"] > 0) & (
+                cand["src_service"].str.contains("kafka", case=False) |
+                cand["dst_service"].str.contains("kafka", case=False)
+            )
+        else:
+            # user asked to exclude brokers entirely
+            is_msg_phys = (cand["n_messaging"] > 0)
+        
+        cand = cand[is_rpc | is_msg_phys]
+        
         matched = _match_ground_truth(cand, gt_df, is_yaml=is_yaml)
         n_total = int(cand.shape[0]); n_matched = int(matched.shape[0]); pct = (n_matched/n_total*100.0) if n_total else 0.0
 
