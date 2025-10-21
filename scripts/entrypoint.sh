@@ -11,6 +11,33 @@ fi
 
 TRACES_JSON="${TRACES_JSON:-${RUN_DIR}/collector/otel-traces.json}"
 
+TRACE="${RUN_DIR}/collector/otel-traces.json"
+SIZE_MB=$(python - <<'PY'
+import os, sys
+trace = sys.argv[1]
+run   = os.environ.get("RUN_DIR","")
+def mb(p): 
+    return round(os.path.getsize(p)/1024/1024, 2) if os.path.exists(p) else 0.0
+s = mb(trace)
+if s == 0.0:
+    s = mb(os.path.join(run, "spans.parquet"))
+print(s)
+PY
+"$TRACE")
+
+SIZE_MB=$(python - <<'PY'
+import os, sys
+trace = sys.argv[1]
+run   = os.environ.get("RUN_DIR","")
+def mb(p): 
+    return round(os.path.getsize(p)/1024/1024, 2) if os.path.exists(p) else 0.0
+s = mb(trace)
+if s == 0.0:
+    s = mb(os.path.join(run, "spans.parquet"))
+print(s)
+PY
+"$TRACE")
+
 echo "[entrypoint] Extract → Graph → Featurize"
 edgetyper extract   --input "$TRACES_JSON"                  --out "${RUN_DIR}/spans.parquet"
 edgetyper graph     --spans "${RUN_DIR}/spans.parquet"      --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
