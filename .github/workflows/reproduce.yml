@@ -238,17 +238,17 @@ jobs:
           export TRACE_JSON="${RUN_DIR}/collector/otel-traces.json"
           export SPANS_PARQUET="${RUN_DIR}/spans.parquet"
           SIZE_MB=$(python - <<'PY'
-import os
-trace = os.environ.get("TRACE_JSON", "")
-spans = os.environ.get("SPANS_PARQUET", "")
-size = 0
-if trace and os.path.exists(trace):
-    size = os.path.getsize(trace)
-if size <= 0 and spans and os.path.exists(spans):
-    size = os.path.getsize(spans)
-print(round(size / 1024 / 1024, 2) if size else 0)
-PY
-)
+          import os
+          trace = os.environ.get("TRACE_JSON", "")
+          spans = os.environ.get("SPANS_PARQUET", "")
+          size = 0
+          if trace and os.path.exists(trace):
+              size = os.path.getsize(trace)
+          if size <= 0 and spans and os.path.exists(spans):
+              size = os.path.getsize(spans)
+          print(round(size / 1024 / 1024, 2) if size else 0)
+          PY
+          )
           cat > "${RUN_DIR}/provenance.json" <<JSON
           {
             "target": "otel-demo",
