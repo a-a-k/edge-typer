@@ -139,7 +139,7 @@ jobs:
       - name: Wait for health & soak traffic
         env:
           # Use workflow inputs when present (manual runs), else default to 180s on pushes.
-          SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '180' }}
+          SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '1800' }}
         run: |
           set -euo pipefail
           echo "Waiting up to 3 minutes for unhealthy/restarting to clear…"
@@ -149,7 +149,7 @@ jobs:
             sleep 5
           done
           # Final default-in-shell in case env var was set to an empty string
-          : "${SOAK_SECONDS:=180}"
+          : "${SOAK_SECONDS:=1800}"
           echo "Soaking for ${SOAK_SECONDS}s (Locust load generator drives traffic)…"
           sleep "${SOAK_SECONDS}"
 
@@ -226,7 +226,7 @@ jobs:
 
       - name: Write provenance.json
         env:
-          SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '180' }}
+          SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '1800' }}
         run: |
           set -euo pipefail
           DEMO_DIR="vendor/opentelemetry-demo"

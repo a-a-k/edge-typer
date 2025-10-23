@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DEMO_REF="${DEMO_REF:-main}"
-SOAK_SECONDS="${SOAK_SECONDS:-180}"
+SOAK_SECONDS="${SOAK_SECONDS:-1800}"
 RUN_DIR="${RUN_DIR:-$PWD/runs/$(date +%s)}"
 mkdir -p "${RUN_DIR}/collector" vendor
 
