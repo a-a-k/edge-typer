@@ -1,14 +1,14 @@
-# .github/workflows/run.yml
-name: EdgeTyper CI (capture → analyze → model → chaos → report)
+name: EdgeTyper — CI pipeline
 
 on:
   push:
     branches: [ restructured ]
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write          # only used when deploying to GitHub Pages on main
+  pages: write
   id-token: write
 
 concurrency:
@@ -19,10 +19,6 @@ jobs:
   run:
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    defaults:
-      run:
-        shell: bash
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,44 +28,28 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('pyproject.toml') }}
-
-      - name: Install EdgeTyper and deps
+      - name: Install package + deps
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
-          python -m pip install requests pandas networkx numpy
+          python -m pip install pandas networkx numpy requests
 
-      - name: Fetch OpenTelemetry Demo (Docker Compose)
+      - name: Fetch OpenTelemetry Demo
         run: git clone --depth=1 https://github.com/open-telemetry/opentelemetry-demo.git otel-demo
 
-      - name: Start OpenTelemetry Demo
+      - name: Start OpenTelemetry Demo (Docker Compose)
         working-directory: otel-demo
-        run: |
-          docker compose up --detach --force-recreate --remove-orphans
+        run: docker compose up --detach --force-recreate --remove-orphans
 
-      - name: Wait until demo is ready (envoy + Jaeger UI)
+      - name: Wait until demo is ready (Envoy :8080 + Jaeger UI)
         run: |
           set -euo pipefail
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8080/ >/dev/null; then break; fi
-            sleep 5
-          done
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8080/jaeger/ui/ >/dev/null; then break; fi
-            sleep 5
-          done
+          for i in {1..60}; do curl -fsS http://localhost:8080/ >/dev/null && break || sleep 2; done
+          for i in {1..60}; do curl -fsS http://localhost:8080/jaeger/ui/ >/dev/null && break || sleep 2; done
 
       - name: Run EdgeTyper pipeline (all stages)
         env:
           RUN_ID: ${{ github.run_id }}
-          OTEL_DEMO_DIR: ${{ github.workspace }}/otel-demo
-          JAEGER_BASE_URL: http://localhost:8080/jaeger
-          # Set SKIP_CHAOS=true to disable chaos on PRs if desired
           SKIP_CHAOS: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
         run: bash scripts/entrypoint.sh
 
@@ -79,9 +59,8 @@ jobs:
           name: edgetyper-${{ github.run_id }}
           path: runs/${{ github.run_id }}/
 
-      # Optional: publish the report to GitHub Pages on main
       - name: Setup Pages
-        if: github.ref == 'refs/heads/restructured' #'refs/heads/main'
+        if: always() #'refs/heads/main'
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
         if: always() #github.ref == 'refs/heads/main'
@@ -92,7 +71,7 @@ jobs:
         if: always() #github.ref == 'refs/heads/main'
         uses: actions/deploy-pages@v4
 
-      - name: Tear down demo (always)
+      - name: Tear down demo
         if: always()
         working-directory: otel-demo
         run: docker compose down -v
