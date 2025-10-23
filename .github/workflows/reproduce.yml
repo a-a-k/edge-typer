@@ -10,7 +10,7 @@ on:
       soak_seconds:
         description: "How long to soak (seconds) after health"
         required: false
-        default: "180"
+        default: "1800"
   push:
     branches: [main]
 
