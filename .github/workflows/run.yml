@@ -30,48 +30,67 @@ jobs:
 
       - name: Install package + deps
         run: |
+          set -euxo pipefail
           python -m pip install --upgrade pip
           python -m pip install -e .
           python -m pip install pandas networkx numpy requests
 
-      - name: Fetch OpenTelemetry Demo
-        run: git clone --depth=1 https://github.com/open-telemetry/opentelemetry-demo.git otel-demo
+      - name: Clone OpenTelemetry Demo into vendor/
+        run: |
+          set -euxo pipefail
+          mkdir -p vendor
+          if [ ! -d vendor/opentelemetry-demo ]; then
+            git clone --depth=1 https://github.com/open-telemetry/opentelemetry-demo.git vendor/opentelemetry-demo
+          fi
 
-      - name: Start OpenTelemetry Demo (Docker Compose)
-        working-directory: otel-demo
-        run: docker compose up --detach --force-recreate --remove-orphans
+      - name: Start OpenTelemetry Demo (Docker Compose from project dir)
+        working-directory: vendor/opentelemetry-demo
+        run: |
+          set -euxo pipefail
+          # Официальный запуск: docker compose up -d
+          docker compose up --force-recreate --remove-orphans --detach
 
-      - name: Wait until demo is ready (Envoy :8080 + Jaeger UI)
+      - name: Wait until Envoy(8080) & Jaeger UI are up (fail fast)
         run: |
           set -euo pipefail
-          for i in {1..60}; do curl -fsS http://localhost:8080/ >/dev/null && break || sleep 2; done
-          for i in {1..60}; do curl -fsS http://localhost:8080/jaeger/ui/ >/dev/null && break || sleep 2; done
+          deadline=$((SECONDS+300))
+          ok_front=false; ok_jaeger=false
+          while [ $SECONDS -lt $deadline ]; do
+            curl -fsS http://localhost:8080/ >/dev/null && ok_front=true || true
+            curl -fsS http://localhost:8080/jaeger/ui/ >/dev/null && ok_jaeger=true || true
+            $ok_front && $ok_jaeger && break
+            sleep 3
+          done
+          $ok_front && $ok_jaeger || { echo "Envoy/Jaeger not ready"; exit 1; }
 
       - name: Run EdgeTyper pipeline (all stages)
         env:
           RUN_ID: ${{ github.run_id }}
           SKIP_CHAOS: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
-        run: bash scripts/entrypoint.sh
+        run: |
+          set -euxo pipefail
+          bash scripts/entrypoint.sh
 
-      - name: Upload run artifact
+      - name: Upload run artifact (only on success)
+        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: edgetyper-${{ github.run_id }}
           path: runs/${{ github.run_id }}/
 
       - name: Setup Pages
-        if: always() #'refs/heads/main'
+        if: ${{ success() && github.ref == 'refs/heads/restructured' }}
         uses: actions/configure-pages@v5
       - name: Upload Pages artifact
-        if: always() #github.ref == 'refs/heads/main'
+        if: ${{ success() && github.ref == 'refs/heads/restructured' }}
         uses: actions/upload-pages-artifact@v3
         with:
           path: runs/${{ github.run_id }}/
       - name: Deploy to Pages
-        if: always() #github.ref == 'refs/heads/main'
+        if: ${{ success() && github.ref == 'refs/heads/restructured' }}
         uses: actions/deploy-pages@v4
 
-      - name: Tear down demo
+      - name: Tear down demo (always)
         if: always()
-        working-directory: otel-demo
+        working-directory: vendor/opentelemetry-demo
         run: docker compose down -v
