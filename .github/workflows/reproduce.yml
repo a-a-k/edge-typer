@@ -215,6 +215,15 @@ jobs:
           ls -lh "${RUN_DIR}/collector" || true
 
 
+      - name: Extract → Graph → Featurize
+        run: |
+          edgetyper extract   --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          edgetyper graph     --spans "${RUN_DIR}/spans.parquet" --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features.parquet"
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_dropped.parquet" --mask-semconv
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_timing_dropped.parquet" --mask-timing
+
+
       - name: Write provenance.json
         env:
           SOAK_SECONDS: ${{ github.event.inputs.soak_seconds || '180' }}
@@ -226,8 +235,20 @@ jobs:
           COMPOSE_VER=$(docker compose version | sed 's/,//g' || true)
           PY_VER=$(python -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')
           PKG_VER=$(python -c 'import importlib; m=importlib.import_module("edgetyper"); print(getattr(m, "__version__", "dev"))' || echo "dev")
-          TRACE="${RUN_DIR}/collector/otel-traces.json"
-          SIZE_MB=$(python -c 'import os; p=os.environ.get("TRACE",""); s=os.path.getsize(p) if os.path.exists(p) else 0; print(round(s/1024/1024,2))')
+          export TRACE_JSON="${RUN_DIR}/collector/otel-traces.json"
+          export SPANS_PARQUET="${RUN_DIR}/spans.parquet"
+          SIZE_MB=$(python - <<'PY'
+import os
+trace = os.environ.get("TRACE_JSON", "")
+spans = os.environ.get("SPANS_PARQUET", "")
+size = 0
+if trace and os.path.exists(trace):
+    size = os.path.getsize(trace)
+if size <= 0 and spans and os.path.exists(spans):
+    size = os.path.getsize(spans)
+print(round(size / 1024 / 1024, 2) if size else 0)
+PY
+)
           cat > "${RUN_DIR}/provenance.json" <<JSON
           {
             "target": "otel-demo",
@@ -242,13 +263,6 @@ jobs:
           }
           JSON
           echo "Provenance:" && cat "${RUN_DIR}/provenance.json"
-
-
-      - name: Extract → Graph → Featurize
-        run: |
-          edgetyper extract   --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
-          edgetyper graph     --spans "${RUN_DIR}/spans.parquet" --out-events "${RUN_DIR}/events.parquet" --out-edges "${RUN_DIR}/edges.parquet"
-          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features.parquet"
 
 
       - name: Inspect feature columns
@@ -267,59 +281,64 @@ jobs:
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+          edgetyper label    --features "${RUN_DIR}/features_semconv_dropped.parquet" --out "${RUN_DIR}/pred_ours_semconv_dropped.csv" --uncertain-threshold 0.5
+          edgetyper label    --features "${RUN_DIR}/features_timing_dropped.parquet"  --out "${RUN_DIR}/pred_ours_timing_dropped.csv"  --uncertain-threshold 0.5
 
 
-      - name: Evaluate (physical GT only) + Plan + Observe + Report
+      - name: Evaluate runs (physical GT)
         run: |
-          # Evaluate (physical)
-          edgetyper eval --name "Ours — physical" \
+          edgetyper eval --name "Ours" \
             --pred "${RUN_DIR}/pred_ours.csv" \
             --features "${RUN_DIR}/features.parquet" \
             --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_ours_physical.json"
-      
-          # (Optional) keep baselines/robustness on the physical graph if you want
-          edgetyper eval --name "Baseline — SemConv (physical)" \
+            --out "${RUN_DIR}/metrics_ours.json"
+
+          edgetyper eval --name "SemConv" \
             --pred "${RUN_DIR}/pred_semconv.csv" \
             --features "${RUN_DIR}/features.parquet" \
             --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_semconv_physical.json"
-      
-          edgetyper eval --name "Baseline — Timing (physical)" \
+            --out "${RUN_DIR}/metrics_semconv.json"
+
+          edgetyper eval --name "Timing" \
             --pred "${RUN_DIR}/pred_timing.csv" \
             --features "${RUN_DIR}/features.parquet" \
             --gt "src/edgetyper/ground_truth.yaml" \
-            --out "${RUN_DIR}/metrics_timing_physical.json"
-      
-          # Plan (IBS/DBS) on physical graph
+            --out "${RUN_DIR}/metrics_timing.json"
+
+          edgetyper eval --name "Ours — SemConv dropped" \
+            --pred "${RUN_DIR}/pred_ours_semconv_dropped.csv" \
+            --features "${RUN_DIR}/features_semconv_dropped.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --out "${RUN_DIR}/metrics_ours_semconv_dropped.json"
+
+          edgetyper eval --name "Ours — Timing dropped" \
+            --pred "${RUN_DIR}/pred_ours_timing_dropped.csv" \
+            --features "${RUN_DIR}/features_timing_dropped.parquet" \
+            --gt "src/edgetyper/ground_truth.yaml" \
+            --out "${RUN_DIR}/metrics_ours_timing_dropped.json"
+
+
+      - name: Plan typed vs all-blocking
+        run: |
           edgetyper plan \
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
             --out   "${RUN_DIR}/plan_physical.csv" \
             --weight events --alpha-ack 1.0
-      
-          # Live observer (spans vs segments)
+          edgetyper plan \
+            --edges "${RUN_DIR}/edges.parquet" \
+            --pred  "${RUN_DIR}/pred_ours.csv" \
+            --out   "${RUN_DIR}/plan_all_blocking.csv" \
+            --weight events --alpha-ack 1.0 \
+            --assume-all-blocking
+
+
+      - name: Observe micro-faults
+        run: |
           edgetyper observe \
             --spans    "${RUN_DIR}/spans.parquet" \
             --segments "${RUN_DIR}/segments.json" \
             --out      "${RUN_DIR}/observations.json"
-      
-          # Enriched report (brokers included by default)
-          edgetyper report \
-            --metrics-dir "${RUN_DIR}" \
-            --outdir "site" \
-            --spans    "${RUN_DIR}/spans.parquet" \
-            --events   "${RUN_DIR}/events.parquet" \
-            --edges    "${RUN_DIR}/edges.parquet" \
-            --features "${RUN_DIR}/features.parquet" \
-            --gt       "src/edgetyper/ground_truth.yaml" \
-            --coverage-top 30 \
-            --provenance "${RUN_DIR}/provenance.json" \
-            --assets-dir "site/data" \
-            --count-mode pred \
-            --include-brokers \
-            --plan "${RUN_DIR}/plan_physical.csv" \
-            --live "${RUN_DIR}/observations.json"
 
 
       - name: Debug table (matched edges + features)
@@ -348,7 +367,12 @@ jobs:
             --gt       "src/edgetyper/ground_truth.yaml" \
             --coverage-top 30 \
             --provenance "${RUN_DIR}/provenance.json" \
-            --assets-dir "site/data"
+            --assets-dir "site/data" \
+            --count-mode pred \
+            --include-brokers \
+            --plan "${RUN_DIR}/plan_physical.csv" \
+            --plan-blocking "${RUN_DIR}/plan_all_blocking.csv" \
+            --live "${RUN_DIR}/observations.json"
 
 
       - name: Upload results bundle (traces + outputs)

@@ -22,6 +22,7 @@ links:
 
   # --- Checkout orchestration (RPC sync) ---
   - { source: checkout,  target: cart,             type: BLOCKING, protocol: grpc }
+  - { source: checkout,  target: product-catalog,  type: BLOCKING, protocol: grpc }
   - { source: checkout,  target: payment,          type: BLOCKING, protocol: http }
   - { source: checkout,  target: shipping,         type: BLOCKING, protocol: grpc }
   - { source: checkout,  target: currency,         type: BLOCKING, protocol: grpc }

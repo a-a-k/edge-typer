@@ -116,10 +116,52 @@ def baseline_cmd(features_path: Path, mode: str, out_path: Path) -> None:
 @main.command("label")
 @click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--out", "out_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
-def label_cmd(features_path: Path, out_path: Path) -> None:
+@click.option(
+    "--uncertain-threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    show_default=False,
+    help="If set, mark rule-confidence below the threshold as 'uncertain' (skip ML fallback).",
+)
+def label_cmd(features_path: Path, out_path: Path, uncertain_threshold: float | None) -> None:
     feats = pd.read_parquet(features_path)
     rules_df = rule_labels_from_features(feats)
-    pred = label_with_fallback(rules_df)
+    if uncertain_threshold is not None:
+        def _conf_to_float(val: object) -> float:
+            if isinstance(val, str):
+                v = val.lower()
+                if v == "high":
+                    return 1.0
+                if v == "low":
+                    return 0.0
+                try:
+                    return float(val)
+                except Exception:
+                    return 0.0
+            try:
+                return float(val)  # type: ignore[arg-type]
+            except Exception:
+                return 0.0
+
+        if "rule_conf" in rules_df.columns:
+            conf_raw = rules_df["rule_conf"]
+        else:
+            conf_raw = pd.Series(["low"] * len(rules_df), index=rules_df.index)
+        conf = conf_raw.map(_conf_to_float)
+        pred = rules_df[["src_service", "dst_service", "rule_label"]].copy()
+        pred["pred_label"] = "uncertain"
+        pred["pred_score"] = 0.5
+        confident = conf >= uncertain_threshold
+        confident_idx = confident[confident].index
+        if not confident_idx.empty:
+            confident_labels = rules_df.loc[confident_idx, "rule_label"].replace({"unknown": "uncertain"})
+            pred.loc[confident_idx, "pred_label"] = confident_labels
+            pred.loc[confident_idx, "pred_score"] = pred.loc[confident_idx, "pred_label"].map(
+                {"async": 1.0, "sync": 0.0}
+            ).fillna(0.5)
+        pred = pred[["src_service", "dst_service", "pred_label", "pred_score"]]
+    else:
+        pred = label_with_fallback(rules_df)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     pred.to_csv(out_path, index=False)
     click.echo(f"[label] wrote {len(pred)} labels → {out_path}")
@@ -207,14 +249,30 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
     # Metrics
     from sklearn.metrics import classification_report, confusion_matrix
     labels = ["async", "sync"]
-    y_true = merged["gt_label"].astype(str)
-    y_pred = merged["pred_label"].astype(str)
-    report = classification_report(y_true, y_pred, labels=labels, output_dict=True, zero_division=0)
-    cm = confusion_matrix(y_true, y_pred, labels=labels).tolist()
+    merged["pred_label"] = merged["pred_label"].astype(str)
+    n_uncertain_pred = int((merged["pred_label"] == "uncertain").sum())
+    evaluated = merged[merged["pred_label"] != "uncertain"].copy()
 
-    # Class counts
-    n_async = int((y_true == "async").sum())
-    n_sync = int((y_true == "sync").sum())
+    if evaluated.empty:
+        report = {
+            "async": {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0},
+            "sync": {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0},
+            "accuracy": 0.0,
+            "macro avg": {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0},
+            "weighted avg": {"precision": 0.0, "recall": 0.0, "f1-score": 0.0, "support": 0},
+        }
+        cm = [[0, 0], [0, 0]]
+        n_async = 0
+        n_sync = 0
+    else:
+        y_true = evaluated["gt_label"].astype(str)
+        y_pred = evaluated["pred_label"].astype(str)
+        report = classification_report(y_true, y_pred, labels=labels, output_dict=True, zero_division=0)
+        cm = confusion_matrix(y_true, y_pred, labels=labels).tolist()
+
+        # Class counts
+        n_async = int((y_true == "async").sum())
+        n_sync = int((y_true == "sync").sum())
 
     # Name fallback from filename if --name not given
     if not run_name:
@@ -224,11 +282,12 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
     metrics: Dict[str, object] = {
         "run_name": run_name,
         "labels": labels,
-        "n_eval_edges": int(len(merged)),
+        "n_eval_edges": int(len(evaluated)),
         "n_async": n_async,
         "n_sync": n_sync,
         "classification_report": report,
         "confusion_matrix": cm,
+        "n_uncertain_pred": n_uncertain_pred,
     }
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(metrics, indent=2))
@@ -258,6 +317,8 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
               help="Which counts to show in the metrics table: predicted by each run, ground truth, or both.")
 @click.option("--plan", "plan_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
               help="Optional chaos plan CSV to embed.")
+@click.option("--plan-blocking", "plan_blocking_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional chaos plan CSV computed with the all-blocking assumption.")
 @click.option("--live", "live_json", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
               help="Optional live observations JSON to embed.")
 @click.option("--include-brokers", is_flag=True, default=True,
@@ -265,7 +326,8 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
 def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
                edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
                prov_path: Path | None, assets_dir: Path | None, count_mode: str,
-               plan_csv: Path | None, live_json: Path | None, include_brokers: bool) -> None:
+               plan_csv: Path | None, plan_blocking_csv: Path | None,
+               live_json: Path | None, include_brokers: bool) -> None:
     import re, shutil
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -290,14 +352,25 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         return name
 
     def scenario_of(name: str) -> str:
-        if "SemConv dropped" in name: return "semconv"
-        if "Timing dropped"  in name: return "timing"
+        s = name.lower()
+        if "semconv dropped" in s:
+            return "semconv_missing"
+        if "timing dropped" in s:
+            return "timing_missing"
+        if "timing" in s:
+            return "timing"
+        if "semconv" in s:
+            return "semconv"
         return "full"
 
     def method_of(name: str) -> str:
         s = name.lower()
-        if "ours" in s or "edgetyper" in s:
+        if any(tok in s for tok in ("ours", "edgetyper", "typed")):
             return "ours"
+        if "baseline" in s and "semconv" in s:
+            return "semconv"
+        if "baseline" in s and "timing" in s:
+            return "timing"
         if "semconv" in s:
             return "semconv"
         if "timing" in s:
@@ -311,16 +384,30 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         dedup[key] = m  # keep last if duplicates
     items = list(dedup.values())
 
-    scenario_order = {"full": 0, "semconv": 1, "timing": 2}
+    scenario_order = {
+        "timing": 0,
+        "semconv": 1,
+        "full": 2,
+        "semconv_missing": 3,
+        "timing_missing": 4,
+    }
     method_order   = {"timing": 0, "semconv": 1, "ours": 2}
-    items.sort(key=lambda m: (scenario_order[scenario_of(m["run_name"])],
-                              method_order[method_of(m["run_name"])]))
+    items.sort(
+        key=lambda m: (
+            scenario_order.get(scenario_of(m["run_name"]), len(scenario_order)),
+            method_order.get(method_of(m["run_name"]), len(method_order)),
+            m["run_name"],
+        )
+    )
 
     # ---------- snapshot (counts & tops) ----------
     spans_df  = pd.read_parquet(spans_path)  if spans_path  else None
     events_df = pd.read_parquet(events_path) if events_path else None
     edges_df  = pd.read_parquet(edges_path)  if edges_path  else None
     feats_df  = pd.read_parquet(features_path) if features_path else None
+    typed_plan_df = None
+    blocking_plan_df = None
+    live_data: dict | None = None
 
     n_spans = len(spans_df) if spans_df is not None else None
     n_services = int(spans_df["service_name"].nunique()) if spans_df is not None and "service_name" in spans_df.columns else None
@@ -389,8 +476,8 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
                 cand["dst_service"].str.contains("kafka", case=False)
             )
         else:
-            # user asked to exclude brokers entirely
-            is_msg_phys = (cand["n_messaging"] > 0)
+            # brokers excluded → no messaging edges remain for evaluation
+            is_msg_phys = pd.Series(False, index=cand.index)
         
         cand = cand[is_rpc | is_msg_phys]
         
@@ -474,12 +561,16 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         html.append("<p><b>No metrics found.</b></p>")
     else:
         # dynamic count header
-        if count_mode.lower() == "pred":
-            count_hdr = "<th>#Pred Async</th><th>#Pred Sync</th>"
-        elif count_mode.lower() == "gt":
+        cmode = count_mode.lower()
+        if cmode == "pred":
+            count_hdr = "<th>#Pred Async</th><th>#Pred Sync</th><th>#Pred Uncertain</th>"
+        elif cmode == "gt":
             count_hdr = "<th>#Async (GT)</th><th>#Sync (GT)</th>"
         else:
-            count_hdr = "<th>#Async (GT)</th><th>#Sync (GT)</th><th>#Pred Async</th><th>#Pred Sync</th>"
+            count_hdr = (
+                "<th>#Async (GT)</th><th>#Sync (GT)</th>"
+                "<th>#Pred Async</th><th>#Pred Sync</th><th>#Pred Uncertain</th>"
+            )
 
         html.append(f"""
         <table>
@@ -503,12 +594,17 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
             pred_async = tp + fp
             pred_sync  = tn + fn
 
-            if count_mode.lower() == "pred":
-                counts_html = f"<td>{pred_async}</td><td>{pred_sync}</td>"
-            elif count_mode.lower() == "gt":
+            pred_uncertain = int(m.get("n_uncertain_pred", 0) or 0)
+
+            if cmode == "pred":
+                counts_html = f"<td>{pred_async}</td><td>{pred_sync}</td><td>{pred_uncertain}</td>"
+            elif cmode == "gt":
                 counts_html = f"<td>{gt_async}</td><td>{gt_sync}</td>"
             else:
-                counts_html = f"<td>{gt_async}</td><td>{gt_sync}</td><td>{pred_async}</td><td>{pred_sync}</td>"
+                counts_html = (
+                    f"<td>{gt_async}</td><td>{gt_sync}</td>"
+                    f"<td>{pred_async}</td><td>{pred_sync}</td><td>{pred_uncertain}</td>"
+                )
 
             html.append(
                 "<tr>"
@@ -549,6 +645,10 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         dl.append("<li><a href='data/top_services.csv' download>top_services.csv</a></li>")
     if (assets / "top_edges.csv").exists():
         dl.append("<li><a href='data/top_edges.csv' download>top_edges.csv</a></li>")
+    if (assets / "plan_all_blocking.csv").exists():
+        dl.append("<li><a href='data/plan_all_blocking.csv' download>plan_all_blocking.csv</a></li>")
+    if (assets / "resilience_compare.csv").exists():
+        dl.append("<li><a href='data/resilience_compare.csv' download>resilience_compare.csv</a></li>")
     if debug_link_html: dl.append(debug_link_html)
     dl.append("</ul>")
     html.extend(dl)
@@ -562,27 +662,44 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
                  
     # ---- Chaos plan (if provided)
     if plan_csv:
-        plan_df = pd.read_csv(plan_csv)
-        plan_df = plan_df.sort_values(["IBS","DBS"], ascending=False)
-        (assets / "plan_physical.csv").write_text(plan_df.to_csv(index=False))
-        rows = ""
-        for i, r in enumerate(plan_df.head(10).itertuples(index=False), 1):
-            rows += (f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
-                     f"<td>{(r.IBS):.1f}</td><td>{(r.DBS):.1f}</td>"
-                     f"<td>{(r.ib_edges_top or '')}</td><td>{(r.db_edges_top or '')}</td></tr>")
-        html.append("<h2>Chaos plan (draft, physical graph)</h2>"
-                    "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
-                    "<th>IBS</th><th>DBS</th><th>Top blocking contributors</th><th>Top async contributors</th>"
-                    "</tr></thead><tbody>"+rows+"</tbody></table>"
-                    "<p><a href='data/plan_physical.csv' download>Download plan_physical.csv</a></p>")
+        try:
+            typed_plan_df = pd.read_csv(plan_csv)
+            typed_plan_df = typed_plan_df.sort_values(["IBS", "DBS"], ascending=False)
+            (assets / "plan_physical.csv").write_text(typed_plan_df.to_csv(index=False))
+            rows = ""
+            for i, r in enumerate(typed_plan_df.head(10).itertuples(index=False), 1):
+                rows += (f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
+                         f"<td>{(r.IBS):.1f}</td><td>{(r.DBS):.1f}</td>"
+                         f"<td>{(r.ib_edges_top or '')}</td><td>{(r.db_edges_top or '')}</td></tr>")
+            html.append("<h2>Chaos plan (draft, physical graph)</h2>"
+                        "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
+                        "<th>IBS</th><th>DBS</th><th>Top blocking contributors</th><th>Top async contributors</th>"
+                        "</tr></thead><tbody>"+rows+"</tbody></table>"
+                        "<p><a href='data/plan_physical.csv' download>Download plan_physical.csv</a></p>")
+        except Exception:
+            typed_plan_df = None
+
+    if plan_blocking_csv:
+        try:
+            blocking_plan_df = pd.read_csv(plan_blocking_csv)
+            blocking_plan_df = blocking_plan_df.sort_values(["IBS", "DBS"], ascending=False)
+            (assets / "plan_all_blocking.csv").write_text(blocking_plan_df.to_csv(index=False))
+        except Exception:
+            blocking_plan_df = None
+
+    if typed_plan_df is not None and (assets / "plan_all_blocking.csv").exists():
+        html.append(
+            "<p><a href='data/plan_all_blocking.csv' download>Download plan_all_blocking.csv</a> "
+            "(all-blocking baseline)</p>"
+        )
     
     # ---- Live sanity (if provided)
     if live_json:
-        live = json.loads(Path(live_json).read_text())
-        if live.get("ok"):
+        live_data = json.loads(Path(live_json).read_text())
+        if live_data.get("ok"):
             html.append("<h2>Live sanity (micro‑faults)</h2>")
             html.append("<ul>")
-            for seg in live.get("segments", []):
+            for seg in live_data.get("segments", []):
                 html.append(f"<li><b>{seg['name']}</b>: total spans={seg['total_spans']}, kinds={seg.get('by_kind',{})}</li>")
             html.append("</ul>")
             dst = assets / "observations.json"
@@ -592,6 +709,154 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
                 html.append("<p><a href='data/observations.json' download>observations.json</a></p>")
             except Exception:
                 pass
+
+    if (
+        typed_plan_df is not None
+        and blocking_plan_df is not None
+        and live_data is not None
+        and live_data.get("ok")
+    ):
+        try:
+            typed_cols = (
+                typed_plan_df.loc[:, ["target", "kind", "IBS", "DBS"]]
+                .rename(
+                    columns={
+                        "kind": "kind_typed",
+                        "IBS": "IBS_typed",
+                        "DBS": "DBS_typed",
+                    }
+                )
+                .copy()
+            )
+            for col in ["IBS_typed", "DBS_typed"]:
+                typed_cols[col] = pd.to_numeric(typed_cols[col], errors="coerce").fillna(0.0)
+            typed_cols["typed_score"] = typed_cols["IBS_typed"] + typed_cols["DBS_typed"]
+
+            block_cols = (
+                blocking_plan_df.loc[:, ["target", "kind", "IBS", "DBS"]]
+                .rename(
+                    columns={
+                        "kind": "kind_blocking",
+                        "IBS": "IBS_blocking",
+                        "DBS": "DBS_blocking",
+                    }
+                )
+                .copy()
+            )
+            for col in ["IBS_blocking", "DBS_blocking"]:
+                block_cols[col] = pd.to_numeric(block_cols[col], errors="coerce").fillna(0.0)
+            block_cols["blocking_score"] = block_cols["IBS_blocking"] + block_cols["DBS_blocking"]
+
+            comp = typed_cols.merge(block_cols, on="target", how="outer")
+            comp["kind"] = comp.get("kind_typed").fillna(comp.get("kind_blocking"))
+            comp["kind"] = comp["kind"].fillna("app")
+
+            baseline_counts: dict[str, float] = {}
+            for seg in live_data.get("segments", []):
+                name = str(seg.get("name", "")).lower()
+                counts = seg.get("by_service_top", {}) or {}
+                if "baseline" in name:
+                    baseline_counts = {k: float(v) for k, v in counts.items()}
+                    break
+            if not baseline_counts and live_data.get("segments"):
+                first = live_data["segments"][0].get("by_service_top", {}) or {}
+                baseline_counts = {k: float(v) for k, v in first.items()}
+
+            impacts: dict[str, float] = {}
+            for seg in live_data.get("segments", []):
+                name = str(seg.get("name", "")).lower()
+                counts = seg.get("by_service_top", {}) or {}
+                if "baseline" in name and baseline_counts:
+                    continue
+                for svc, count in counts.items():
+                    try:
+                        cnt = float(count)
+                    except Exception:
+                        cnt = 0.0
+                    base = baseline_counts.get(svc, 0.0)
+                    delta = max(0.0, cnt - base)
+                    if delta == 0.0 and cnt > 0.0 and svc not in baseline_counts:
+                        delta = cnt
+                    impacts[svc] = max(impacts.get(svc, 0.0), delta)
+
+            live_df = pd.DataFrame([[svc, val] for svc, val in impacts.items()], columns=["target", "live_impact"])
+            comp = comp.merge(live_df, on="target", how="left")
+            for col in [
+                "typed_score",
+                "blocking_score",
+                "IBS_typed",
+                "DBS_typed",
+                "IBS_blocking",
+                "DBS_blocking",
+                "live_impact",
+            ]:
+                comp[col] = pd.to_numeric(comp[col], errors="coerce").fillna(0.0)
+
+            comp = comp[
+                [
+                    "target",
+                    "kind",
+                    "IBS_typed",
+                    "DBS_typed",
+                    "typed_score",
+                    "IBS_blocking",
+                    "DBS_blocking",
+                    "blocking_score",
+                    "live_impact",
+                ]
+            ].drop_duplicates(subset=["target"])
+
+            comp_sorted = comp.sort_values("typed_score", ascending=False).reset_index(drop=True)
+            (assets / "resilience_compare.csv").write_text(comp_sorted.to_csv(index=False))
+
+            corr_df = comp_sorted[
+                (comp_sorted[["typed_score", "blocking_score", "live_impact"]].abs().sum(axis=1)) > 0
+            ]
+
+            def _corr(col: str, method: str) -> float | None:
+                if len(corr_df) < 2:
+                    return None
+                val = corr_df[col].corr(corr_df["live_impact"], method=method)
+                if pd.isna(val):
+                    return None
+                return float(val)
+
+            def _fmt_corr(val: float | None) -> str:
+                return "n/a" if val is None else f"{val:.3f}"
+
+            spearman_typed = _corr("typed_score", "spearman")
+            spearman_blocking = _corr("blocking_score", "spearman")
+            kendall_typed = _corr("typed_score", "kendall")
+            kendall_blocking = _corr("blocking_score", "kendall")
+
+            rows = ""
+            for i, r in enumerate(comp_sorted.head(15).itertuples(index=False), 1):
+                rows += (
+                    f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
+                    f"<td>{r.IBS_typed:.1f}</td><td>{r.DBS_typed:.1f}</td><td>{r.typed_score:.1f}</td>"
+                    f"<td>{r.IBS_blocking:.1f}</td><td>{r.DBS_blocking:.1f}</td><td>{r.blocking_score:.1f}</td>"
+                    f"<td>{r.live_impact:.1f}</td></tr>"
+                )
+
+            html.append("<h2>Resilience prediction vs live</h2>")
+            html.append(
+                "<p>Rank correlation with observed micro-fault span deltas: "
+                f"typed Spearman ρ={_fmt_corr(spearman_typed)}, "
+                f"all-blocking Spearman ρ={_fmt_corr(spearman_blocking)}, "
+                f"typed Kendall τ={_fmt_corr(kendall_typed)}, "
+                f"all-blocking Kendall τ={_fmt_corr(kendall_blocking)}.</p>"
+            )
+            html.append(
+                "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
+                "<th>Typed IBS</th><th>Typed DBS</th><th>Typed IBS+DBS</th>"
+                "<th>All-blocking IBS</th><th>All-blocking DBS</th><th>All-blocking IBS+DBS</th>"
+                "<th>Live Δ spans</th></tr></thead><tbody>" + rows + "</tbody></table>"
+            )
+            html.append(
+                "<p><a href='data/resilience_compare.csv' download>Download resilience_compare.csv</a></p>"
+            )
+        except Exception:
+            pass
 
     html.append("</body></html>")
     (outdir / "index.html").write_text("\n".join(html))
@@ -635,7 +900,22 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
               help="Immediate producer impact fraction if the target is a broker (0..1).")
 @click.option("--broker-tokens", type=str, default="kafka,zookeeper", show_default=True,
               help="Comma-separated substrings to identify broker nodes.")
-def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alpha_ack: float, broker_tokens: str) -> None:
+@click.option(
+    "--assume-all-blocking",
+    is_flag=True,
+    default=False,
+    show_default=True,
+    help="Treat every edge as blocking (ignore predicted types).",
+)
+def plan_cmd(
+    edges_path: Path,
+    pred_path: Path,
+    out_path: Path,
+    weight: str,
+    alpha_ack: float,
+    broker_tokens: str,
+    assume_all_blocking: bool,
+) -> None:
     from collections import defaultdict, deque
 
     tok = {t.strip().lower() for t in broker_tokens.split(",") if t.strip()}
@@ -658,9 +938,12 @@ def plan_cmd(edges_path: Path, pred_path: Path, out_path: Path, weight: str, alp
     preds = pd.read_csv(pred_path)
 
     # Join predicted labels onto edges
-    g = edges.merge(preds[["src_service","dst_service","pred_label"]],
-                    on=["src_service","dst_service"], how="left")
-    g["etype"] = g["pred_label"].str.lower().map({"async":"ASYNC","sync":"BLOCKING"})
+    g = edges.merge(preds[["src_service", "dst_service", "pred_label"]],
+                    on=["src_service", "dst_service"], how="left")
+    if assume_all_blocking:
+        g["etype"] = "BLOCKING"
+    else:
+        g["etype"] = g["pred_label"].str.lower().map({"async": "ASYNC", "sync": "BLOCKING"})
     g = g.dropna(subset=["etype"]).copy()
 
     wcol = {"events":"n_events","rpc":"n_rpc","messaging":"n_messaging"}[weight.lower()]
