@@ -88,10 +88,10 @@ jobs:
           EOF
         
           # 4) Bring the demo up, soak, then tear it down
-          docker compose -f vendor/opentelemetry-demo/docker-compose.yaml up --force-recreate --remove-orphans --detach
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml up --force-recreate --remove-orphans --detach
           echo "Soaking for ${SOAK_SECONDS}s..."
           sleep "${SOAK_SECONDS}"
-          docker compose -f vendor/opentelemetry-demo/docker-compose.yaml down -v || true
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yml down -v || true
         
           # 5) Verify trace JSON and extract to Parquet
           if [[ ! -s "${RUN_DIR}/collector/otel-traces.json" ]]; then
