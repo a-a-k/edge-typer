@@ -29,7 +29,7 @@ jobs:
         i: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
         j: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
     env:
-      SOAK_SECONDS: "1800"
+      SOAK_SECONDS: "180"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,99 +56,125 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$RUN_DIR"
+          mkdir -p "$RUN_DIR/collector"
 
-          # --- START DEMO (adapt to your repo's method; keep consistent with reproduce.yml) ---
-          # Example: docker compose -f vendor/opentelemetry-demo/docker-compose.yaml up -d
-          # Sleep to soak
-          echo "Soaking for ${SOAK_SECONDS}s..."
-          sleep "${SOAK_SECONDS}"
-
-          # --- EXPORT TRACES (adapt to your current extract source) ---
-          # Ensure you have a traces file or directly extract from the collector:
-          # edgetyper extract --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
-          # If you already produce spans.parquet, skip extraction.
-
-          # For robustness, fall back to spans.parquet if JSON is missing.
-          if [[ ! -f "${RUN_DIR}/spans.parquet" && -f "${RUN_DIR}/collector/otel-traces.json" ]]; then
-            edgetyper extract --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
+          if [[ ! -d vendor/opentelemetry-demo ]]; then
+            git clone --depth=1 https://github.com/open-telemetry/opentelemetry-demo vendor/opentelemetry-demo
           fi
 
-          # --- GRAPH ---
+          # 2) Enable a file exporter in the demo's "extras" config so traces are written to /data/otel-traces.json
+          #    (The demo merges otelcol-config.yml and otelcol-config-extras.yml by default.)
+          EXTRAS="vendor/opentelemetry-demo/src/otel-collector/otelcol-config-extras.yml"
+          # Ensure file exporter + traces pipeline exporter list include file/otlpjson.
+          # Safe idempotent rewrite: remove any old file/otlpjson block and append a clean minimal extras.
+          sed -i '/^exporters:/,/^service:/d' "$EXTRAS" || true
+          cat >> "$EXTRAS" <<'YAML'
+          exporters:
+            file/otlpjson:
+              path: /data/otel-traces.json
+          service:
+            pipelines:
+              traces:
+                exporters: [ spanmetrics, otlp, file/otlpjson ]
+          YAML
+        
+          # 3) Compose override to mount a host directory for /data so the JSON lands in $RUN_DIR/collector
+          cat > vendor/opentelemetry-demo/docker-compose.override.yml <<EOF
+          services:
+            otel-collector:
+              volumes:
+                - ${RUN_DIR}/collector:/data
+          EOF
+        
+          # 4) Bring the demo up, soak, then tear it down
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yaml up --force-recreate --remove-orphans --detach
+          echo "Soaking for ${SOAK_SECONDS}s..."
+          sleep "${SOAK_SECONDS}"
+          docker compose -f vendor/opentelemetry-demo/docker-compose.yaml down -v || true
+        
+          # 5) Verify trace JSON and extract to Parquet
+          if [[ ! -s "${RUN_DIR}/collector/otel-traces.json" ]]; then
+          echo "ERROR: ${RUN_DIR}/collector/otel-traces.json is missing or empty."
+          ls -l "${RUN_DIR}/collector" || true
+          exit 1
+          fi
+          edgetyper extract --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          echo "[capture] spans.parquet: $(ls -lh "${RUN_DIR}/spans.parquet" | awk '{print $5}')"
+        
+          # 6) Continue exactly as before (graph → features → predictions → eval → plan → observe)
           edgetyper graph \
-            --spans "${RUN_DIR}/spans.parquet" \
-            --out-events "${RUN_DIR}/events.parquet" \
-            --out-edges  "${RUN_DIR}/edges.parquet" \
-            --with-broker-edges
-
-          # --- FEATURES (full) ---
+          --spans "${RUN_DIR}/spans.parquet" \
+          --out-events "${RUN_DIR}/events.parquet" \
+          --out-edges "${RUN_DIR}/edges.parquet" \
+          --with-broker-edges
+          
           edgetyper featurize \
-            --events "${RUN_DIR}/events.parquet" \
-            --edges  "${RUN_DIR}/edges.parquet" \
-            --out    "${RUN_DIR}/features.parquet"
-
-          # --- PREDICTIONS ---
+          --events "${RUN_DIR}/events.parquet" \
+          --edges  "${RUN_DIR}/edges.parquet" \
+          --out    "${RUN_DIR}/features.parquet"
+          
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
-          edgetyper label    --features "${RUN_DIR}/features.parquet"                --out "${RUN_DIR}/pred_ours.csv"
-
-          # --- ROBUSTNESS MASKS ---
+          edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+          
+          # Robustness masks
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_drop.parquet" --mask-semconv
           edgetyper label    --features "${RUN_DIR}/features_semconv_drop.parquet" --out "${RUN_DIR}/pred_ours_semconv_drop.csv" --uncertain-threshold 0.55
-
-          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_timing_drop.parquet"  --mask-timing
-          edgetyper label    --features "${RUN_DIR}/features_timing_drop.parquet"  --out "${RUN_DIR}/pred_ours_timing_drop.csv"  --uncertain-threshold 0.55
-
-          # --- EVAL (physical GT path as used in your current workflow) ---
+          
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_timing_drop.parquet" --mask-timing
+          edgetyper label    --features "${RUN_DIR}/features_timing_drop.parquet" --out "${RUN_DIR}/pred_ours_timing_drop.csv" --uncertain-threshold 0.55
+          
+          # Physical GT path in this repo
           GT="src/edgetyper/ground_truth.yaml"
-          edgetyper eval --name "Baseline — SemConv (physical)" --pred "${RUN_DIR}/pred_semconv.csv"            --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_semconv_physical.json"
-          edgetyper eval --name "Baseline — Timing (physical)"  --pred "${RUN_DIR}/pred_timing.csv"             --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_timing_physical.json"
-          edgetyper eval --name "EdgeTyper (ours) — physical"   --pred "${RUN_DIR}/pred_ours.csv"               --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_ours_physical.json"
+          
+          edgetyper eval --name "Baseline — SemConv (physical)"   --pred "${RUN_DIR}/pred_semconv.csv"             --features "${RUN_DIR}/features.parquet"              --gt "$GT" --out "${RUN_DIR}/metrics_semconv_physical.json"
+          edgetyper eval --name "Baseline — Timing (physical)"    --pred "${RUN_DIR}/pred_timing.csv"              --features "${RUN_DIR}/features.parquet"              --gt "$GT" --out "${RUN_DIR}/metrics_timing_physical.json"
+          edgetyper eval --name "EdgeTyper (ours) — physical"     --pred "${RUN_DIR}/pred_ours.csv"                --features "${RUN_DIR}/features.parquet"              --gt "$GT" --out "${RUN_DIR}/metrics_ours_physical.json"
           edgetyper eval --name "EdgeTyper (ours) — SemConv dropped" --pred "${RUN_DIR}/pred_ours_semconv_drop.csv" --features "${RUN_DIR}/features_semconv_drop.parquet" --gt "$GT" --out "${RUN_DIR}/metrics_ours_semconv_drop.json"
           edgetyper eval --name "EdgeTyper (ours) — Timing dropped"  --pred "${RUN_DIR}/pred_ours_timing_drop.csv"  --features "${RUN_DIR}/features_timing_drop.parquet"  --gt "$GT" --out "${RUN_DIR}/metrics_ours_timing_drop.json"
-
-          # --- PLANS: typed and all-blocking ---
+          
+          # Plans: ours vs all-blocking synthetic
           edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_ours.csv" --out "${RUN_DIR}/plan_physical.csv" --weight events --alpha-ack 1.0
-          # all-blocking by synthetic predictions (no CLI change needed)
           python - <<'PY'
           import pandas as pd, sys
           edges = pd.read_parquet(sys.argv[1])[["src_service","dst_service"]].drop_duplicates()
-          edges["pred_label"]="sync"; edges.to_csv(sys.argv[2], index=False)
+          edges["pred_label"]="sync"
+          edges.to_csv(sys.argv[2], index=False)
           PY
           "${RUN_DIR}/edges.parquet" "${RUN_DIR}/pred_all_blocking.csv"
           edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_all_blocking.csv" --out "${RUN_DIR}/plan_all_blocking.csv" --weight events --alpha-ack 1.0
-
-          # --- OBSERVE: equal-length windows (baseline + two micro-faults placeholders) ---
+          
+          # Observe: build equal windows (baseline and two fault windows)
           python - <<'PY'
           import json, pandas as pd, os
           from pathlib import Path
           run = Path(os.environ["RUN_DIR"])
-          sp = pd.read_parquet(run/"spans.parquet")
-          tscol = [c for c in ["start_time_unix_nano","start_unix_nano","start_ns","time_unix_nano"] if c in sp.columns][0]
-          tmin, tmax = int(sp[tscol].min()), int(sp[tscol].max())
-          W = 120 * 1_000_000_000  # 120s
-          seg = []
-          # baseline: last 120s pre-tail
-          seg.append({"name":"baseline","start_ns": tmax-3*W, "end_ns": tmax-2*W})
-          # "fault" windows (if you inject faults they should align; if not, still produces comparable windows)
-          seg.append({"name":"fault:kafka","target_service":"kafka","start_ns": tmax-2*W, "end_ns": tmax-1*W})
-          seg.append({"name":"fault:consumer","target_service":"fraud-detection","start_ns": tmax-1*W, "end_ns": tmax-0*W})
-          (Path(run/"segments.json")).write_text(json.dumps({"segments":seg}, indent=2))
-          PY
+          sp  = pd.read_parquet(run/"spans.parquet")
+          ts  = [c for c in ["start_time_unix_nano","start_unix_nano","start_ns","time_unix_nano"] if c in sp.columns][0]
+          tmin, tmax = int(sp[ts].min()), int(sp[ts].max())
+          W = 120 * 1_000_000_000
+          segments = [
+          { "name": "baseline",       "start_ns": tmax-3*W, "end_ns": tmax-2*W },
+          { "name": "fault:kafka",    "target_service": "kafka",             "start_ns": tmax-2*W, "end_ns": tmax-1*W },
+          { "name": "fault:consumer", "target_service": "fraud-detection",   "start_ns": tmax-1*W, "end_ns": tmax-0*W },
+          ]
+            (run/"segments.json").write_text(json.dumps({"segments":segments}, indent=2))
+            PY
           edgetyper observe --spans "${RUN_DIR}/spans.parquet" --segments "${RUN_DIR}/segments.json" --out "${RUN_DIR}/observations.json"
-
-          # --- PROVENANCE (size fallback to spans.parquet) ---
-          TRACE_JSON="${RUN_DIR}/collector/otel-traces.json"
+      
+          # Provenance (report size from JSON or fallback to Parquet)
           SIZE_MB=$(python - <<'PY'
-          import os, sys, json
-          run=os.environ["RUN_DIR"]; tj=os.path.join(run,"collector","otel-traces.json"); sz=os.path.getsize(tj) if os.path.exists(tj) else 0
-          if sz==0: pq=os.path.join(run,"spans.parquet"); sz=os.path.getsize(pq) if os.path.exists(pq) else 0
+          import os, json
+          run=os.environ["RUN_DIR"]
+          tj=os.path.join(run,"collector","otel-traces.json")
+          pq=os.path.join(run,"spans.parquet")
+          sz=os.path.getsize(tj) if os.path.exists(tj) else (os.path.getsize(pq) if os.path.exists(pq) else 0)
           print(round(sz/1024/1024,2))
           PY
           )
           cat > "${RUN_DIR}/provenance.json" <<JSON
-          { "target":"otel-demo","demo_ref":"main","demo_commit":"${{ github.sha }}",
-            "soak_seconds": ${SOAK_SECONDS}, "traces_size_mb": ${SIZE_MB} }
+          { "target": "otel-demo","soak_seconds": ${ SOAK_SECONDS },"traces_size_mb": ${ SIZE_MB } }
           JSON
 
       - name: Upload replica artifact

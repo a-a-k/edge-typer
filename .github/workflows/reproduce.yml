@@ -11,8 +11,8 @@ on:
         description: "How long to soak (seconds) after health"
         required: false
         default: "1800"
-  push:
-    branches: [main]
+  #push:
+    #branches: [main]
 
 permissions:
   contents: read
