@@ -64,34 +64,53 @@ jobs:
           fi
 
           # 2) Enable a file exporter in the demo's "extras" config so traces are written to /data/otel-traces.json
-          #    (The demo merges otelcol-config.yml and otelcol-config-extras.yml by default.)
-          EXTRAS="vendor/opentelemetry-demo/src/otel-collector/otelcol-config-extras.yml"
-          # Ensure file exporter + traces pipeline exporter list include file/otlpjson.
-          # Safe idempotent rewrite: remove any old file/otlpjson block and append a clean minimal extras.
-          sed -i '/^exporters:/,/^service:/d' "$EXTRAS" || true
+          EXTRAS="${DEMO_DIR}/src/otel-collector/otelcol-config-extras.yml"
+          
+          # Drop only the exporters→service block to avoid conflicts, then append our config.
+          awk 'BEGIN{p=1} /^exporters:/{p=0} /^service:/{print; p=1; next} p{print}' "$EXTRAS" > "$EXTRAS.tmp" && mv "$EXTRAS.tmp" "$EXTRAS"
+          
           cat >> "$EXTRAS" <<'YAML'
           exporters:
             file/otlpjson:
               path: /data/otel-traces.json
+              flush_interval: 2s
+          
           service:
             pipelines:
               traces:
-                exporters: [ spanmetrics, otlp, file/otlpjson ]
+                exporters: [spanmetrics, otlp, file/otlpjson]
           YAML
         
           # 3) Compose override to mount a host directory for /data so the JSON lands in $RUN_DIR/collector
-          cat > vendor/opentelemetry-demo/docker-compose.override.yml <<EOF
+          cat > "${DEMO_DIR}/docker-compose.override.yml" <<'YAML'
           services:
             otel-collector:
               volumes:
-                - ${RUN_DIR}/collector:/data
-          EOF
+                - "${RUN_DIR}/collector:/data:rw"
+          YAML
+
         
           # 4) Bring the demo up, soak, then tear it down
-          docker compose -f vendor/opentelemetry-demo/docker-compose.yml up --force-recreate --remove-orphans --detach
+          mkdir -p "${RUN_DIR}/collector"
+          # ensure the collector (non-root in container) can create the file
+          chmod 0777 "${RUN_DIR}/collector"
+
+          COMPOSE="$DEMO_DIR/docker-compose.yml"
+          test -f "$COMPOSE" || COMPOSE="$DEMO_DIR/compose.yaml"
+          
+          docker compose -f "$COMPOSE" up --force-recreate --remove-orphans --detach
           echo "Soaking for ${SOAK_SECONDS}s..."
           sleep "${SOAK_SECONDS}"
-          docker compose -f vendor/opentelemetry-demo/docker-compose.yml down -v || true
+          
+          # show collector logs (first) for easy diagnosis
+          docker compose -f "$COMPOSE" logs --no-color --tail=2000 otel-collector || true
+          
+          test -s "${RUN_DIR}/collector/otel-traces.json" || {
+            echo "ERROR: $(ls -lah ${RUN_DIR}/collector || true)"
+            exit 1
+          }
+
+          docker compose -f "$COMPOSE" down -v || true
         
           # 5) Verify trace JSON and extract to Parquet
           if [[ ! -s "${RUN_DIR}/collector/otel-traces.json" ]]; then
