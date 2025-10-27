@@ -54,9 +54,12 @@ jobs:
 
       - name: Capture & Analyze
         shell: bash
+        env:
+          DEMO_DIR: ${{ github.workspace }}/vendor/opentelemetry-demo
         run: |
           set -euo pipefail
           mkdir -p "$RUN_DIR/collector"
+          DEMO_DIR="${DEMO_DIR:-"$GITHUB_WORKSPACE/vendor/opentelemetry-demo"}"
 
           # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
           if [[ ! -d vendor/opentelemetry-demo ]]; then
