@@ -1,0 +1,201 @@
+name: Reproduce (matrix 256)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - "src/**"
+      - "scripts/**"
+      - ".github/workflows/reproduce-matrix.yml"
+      - ".github/workflows/reproduce.yml"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: matrix-reproduce-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  replicate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        i: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+        j: [1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]
+    env:
+      SOAK_SECONDS: "1800"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Compute REPL_ID and RUN_DIR
+        run: |
+          I=${{ matrix.i }}
+          J=${{ matrix.j }}
+          REPL_ID=$(( ( (I-1)*16 ) + J ))
+          echo "REPL_ID=$REPL_ID" >> $GITHUB_ENV
+          echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${REPL_ID}" >> $GITHUB_ENV
+
+      - name: Install package (editable)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Capture & Analyze
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUN_DIR"
+
+          # --- START DEMO (adapt to your repo's method; keep consistent with reproduce.yml) ---
+          # Example: docker compose -f vendor/opentelemetry-demo/docker-compose.yaml up -d
+          # Sleep to soak
+          echo "Soaking for ${SOAK_SECONDS}s..."
+          sleep "${SOAK_SECONDS}"
+
+          # --- EXPORT TRACES (adapt to your current extract source) ---
+          # Ensure you have a traces file or directly extract from the collector:
+          # edgetyper extract --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          # If you already produce spans.parquet, skip extraction.
+
+          # For robustness, fall back to spans.parquet if JSON is missing.
+          if [[ ! -f "${RUN_DIR}/spans.parquet" && -f "${RUN_DIR}/collector/otel-traces.json" ]]; then
+            edgetyper extract --input "${RUN_DIR}/collector/otel-traces.json" --out "${RUN_DIR}/spans.parquet"
+          fi
+
+          # --- GRAPH ---
+          edgetyper graph \
+            --spans "${RUN_DIR}/spans.parquet" \
+            --out-events "${RUN_DIR}/events.parquet" \
+            --out-edges  "${RUN_DIR}/edges.parquet" \
+            --with-broker-edges
+
+          # --- FEATURES (full) ---
+          edgetyper featurize \
+            --events "${RUN_DIR}/events.parquet" \
+            --edges  "${RUN_DIR}/edges.parquet" \
+            --out    "${RUN_DIR}/features.parquet"
+
+          # --- PREDICTIONS ---
+          edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
+          edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
+          edgetyper label    --features "${RUN_DIR}/features.parquet"                --out "${RUN_DIR}/pred_ours.csv"
+
+          # --- ROBUSTNESS MASKS ---
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_drop.parquet" --mask-semconv
+          edgetyper label    --features "${RUN_DIR}/features_semconv_drop.parquet" --out "${RUN_DIR}/pred_ours_semconv_drop.csv" --uncertain-threshold 0.55
+
+          edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_timing_drop.parquet"  --mask-timing
+          edgetyper label    --features "${RUN_DIR}/features_timing_drop.parquet"  --out "${RUN_DIR}/pred_ours_timing_drop.csv"  --uncertain-threshold 0.55
+
+          # --- EVAL (physical GT path as used in your current workflow) ---
+          GT="src/edgetyper/ground_truth.yaml"
+          edgetyper eval --name "Baseline — SemConv (physical)" --pred "${RUN_DIR}/pred_semconv.csv"            --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_semconv_physical.json"
+          edgetyper eval --name "Baseline — Timing (physical)"  --pred "${RUN_DIR}/pred_timing.csv"             --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_timing_physical.json"
+          edgetyper eval --name "EdgeTyper (ours) — physical"   --pred "${RUN_DIR}/pred_ours.csv"               --features "${RUN_DIR}/features.parquet"               --gt "$GT" --out "${RUN_DIR}/metrics_ours_physical.json"
+          edgetyper eval --name "EdgeTyper (ours) — SemConv dropped" --pred "${RUN_DIR}/pred_ours_semconv_drop.csv" --features "${RUN_DIR}/features_semconv_drop.parquet" --gt "$GT" --out "${RUN_DIR}/metrics_ours_semconv_drop.json"
+          edgetyper eval --name "EdgeTyper (ours) — Timing dropped"  --pred "${RUN_DIR}/pred_ours_timing_drop.csv"  --features "${RUN_DIR}/features_timing_drop.parquet"  --gt "$GT" --out "${RUN_DIR}/metrics_ours_timing_drop.json"
+
+          # --- PLANS: typed and all-blocking ---
+          edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_ours.csv" --out "${RUN_DIR}/plan_physical.csv" --weight events --alpha-ack 1.0
+          # all-blocking by synthetic predictions (no CLI change needed)
+          python - <<'PY'
+          import pandas as pd, sys
+          edges = pd.read_parquet(sys.argv[1])[["src_service","dst_service"]].drop_duplicates()
+          edges["pred_label"]="sync"; edges.to_csv(sys.argv[2], index=False)
+          PY
+          "${RUN_DIR}/edges.parquet" "${RUN_DIR}/pred_all_blocking.csv"
+          edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_all_blocking.csv" --out "${RUN_DIR}/plan_all_blocking.csv" --weight events --alpha-ack 1.0
+
+          # --- OBSERVE: equal-length windows (baseline + two micro-faults placeholders) ---
+          python - <<'PY'
+          import json, pandas as pd, os
+          from pathlib import Path
+          run = Path(os.environ["RUN_DIR"])
+          sp = pd.read_parquet(run/"spans.parquet")
+          tscol = [c for c in ["start_time_unix_nano","start_unix_nano","start_ns","time_unix_nano"] if c in sp.columns][0]
+          tmin, tmax = int(sp[tscol].min()), int(sp[tscol].max())
+          W = 120 * 1_000_000_000  # 120s
+          seg = []
+          # baseline: last 120s pre-tail
+          seg.append({"name":"baseline","start_ns": tmax-3*W, "end_ns": tmax-2*W})
+          # "fault" windows (if you inject faults they should align; if not, still produces comparable windows)
+          seg.append({"name":"fault:kafka","start_ns": tmax-2*W, "end_ns": tmax-1*W})
+          seg.append({"name":"fault:consumer","start_ns": tmax-1*W, "end_ns": tmax-0*W})
+          (Path(run/"segments.json")).write_text(json.dumps({"segments":seg}, indent=2))
+          PY
+          edgetyper observe --spans "${RUN_DIR}/spans.parquet" --segments "${RUN_DIR}/segments.json" --out "${RUN_DIR}/observations.json"
+
+          # --- PROVENANCE (size fallback to spans.parquet) ---
+          TRACE_JSON="${RUN_DIR}/collector/otel-traces.json"
+          SIZE_MB=$(python - <<'PY'
+          import os, sys, json
+          run=os.environ["RUN_DIR"]; tj=os.path.join(run,"collector","otel-traces.json"); sz=os.path.getsize(tj) if os.path.exists(tj) else 0
+          if sz==0: pq=os.path.join(run,"spans.parquet"); sz=os.path.getsize(pq) if os.path.exists(pq) else 0
+          print(round(sz/1024/1024,2))
+          PY
+          )
+          cat > "${RUN_DIR}/provenance.json" <<JSON
+          { "target":"otel-demo","demo_ref":"main","demo_commit":"${{ github.sha }}",
+            "soak_seconds": ${SOAK_SECONDS}, "traces_size_mb": ${SIZE_MB} }
+          JSON
+
+      - name: Upload replica artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: replicate-${{ env.REPL_ID }}
+          path: |
+            ${{ env.RUN_DIR }}/metrics_*.json
+            ${{ env.RUN_DIR }}/plan_physical.csv
+            ${{ env.RUN_DIR }}/plan_all_blocking.csv
+            ${{ env.RUN_DIR }}/observations.json
+            ${{ env.RUN_DIR }}/provenance.json
+
+  aggregate:
+    runs-on: ubuntu-latest
+    needs: [replicate]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download all replica artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: replicate-*
+          merge-multiple: true
+          path: replicas
+
+      - name: Aggregate replicas → site/
+        run: |
+          python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: [aggregate]
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
