@@ -37,14 +37,39 @@ def extract_cmd(input_path: Path, out_path: Path, **_ignore):
 
 # ---------------- graph ----------------
 @main.command("graph")
-@click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--spans", "spans_path", type=click.Path(dir_okay=False, path_type=Path), required=True)
 @click.option("--out-events", "out_events", type=click.Path(dir_okay=False, path_type=Path), required=True)
 @click.option("--out-edges", "out_edges", type=click.Path(dir_okay=False, path_type=Path), required=True)
 @click.option("--with-broker-edges/--no-broker-edges", default=True, show_default=True,
               help="Emit producer→broker and broker→consumer edges in addition to producer→consumer.")
 @click.option("--broker-service", default="kafka", show_default=True, help="Name to use for the broker node.")
 def graph_cmd(spans_path: Path, out_events: Path, out_edges: Path, with_broker_edges: bool, broker_service: str) -> None:
-    spans = pd.read_parquet(spans_path)
+    def _maybe_restore_spans() -> pd.DataFrame:
+        if spans_path.exists():
+            return pd.read_parquet(spans_path)
+
+        json_fallback = spans_path.with_suffix(".json")
+        if json_fallback.exists():
+            click.echo(
+                f"[graph] spans parquet missing; rebuilding from {json_fallback.name}",
+                err=True,
+            )
+            df = read_otlp_json(json_fallback)
+            try:
+                spans_path.parent.mkdir(parents=True, exist_ok=True)
+                df.to_parquet(spans_path, index=False)
+                click.echo(f"[graph] wrote reconstructed spans → {spans_path}")
+            except Exception as exc:
+                raise click.ClickException(
+                    f"Failed to materialize spans parquet at {spans_path}: {exc}"
+                )
+            return df
+
+        raise click.ClickException(
+            f"Spans parquet not found: {spans_path}. Run 'edgetyper extract' first or provide the JSON next to it."
+        )
+
+    spans = _maybe_restore_spans()
     results = build_graph(spans, emit_broker_edges=with_broker_edges, broker_service_name=broker_service)
     out_events.parent.mkdir(parents=True, exist_ok=True)
     out_edges.parent.mkdir(parents=True, exist_ok=True)
