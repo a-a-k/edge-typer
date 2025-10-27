@@ -1,203 +1,371 @@
 #!/usr/bin/env python3
-import argparse, json, os, random
+"""Aggregate 256-replica EdgeTyper runs into a single summary site."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import random
 from pathlib import Path
+from statistics import mean
+from typing import Any, Iterable
+
 import pandas as pd
 
-def read_json(p):
+
+def read_json(path: Path) -> dict | None:
     try:
-        return json.loads(Path(p).read_text())
+        return json.loads(path.read_text())
     except Exception:
         return None
 
-def bootstrap_ci(values, iters=2000, alpha=0.05, seed=0):
-    if not values: return (None, None)
+
+def bootstrap_ci(values: Iterable[float], iters: int = 2000, alpha: float = 0.05, seed: int = 0) -> tuple[float | None, float | None]:
+    vals = [float(v) for v in values if v is not None]
+    if not vals:
+        return None, None
     rng = random.Random(seed)
-    n = len(values)
+    n = len(vals)
     boots = []
     for _ in range(iters):
-        samp = [values[rng.randrange(n)] for _ in range(n)]
-        boots.append(pd.Series(samp).mean())
+        samp = [vals[rng.randrange(n)] for _ in range(n)]
+        boots.append(mean(samp))
     boots.sort()
-    lo = boots[int((alpha/2)*iters)]
-    hi = boots[int((1-alpha/2)*iters)]
-    return (lo, hi)
+    lo_idx = max(0, int((alpha / 2) * iters))
+    hi_idx = min(iters - 1, int((1 - alpha / 2) * iters))
+    return boots[lo_idx], boots[hi_idx]
 
-def load_metrics(rep_dir):
-    m = {}
-    for key in ["ours_physical","semconv_physical","timing_physical","ours_semconv_drop","ours_timing_drop"]:
-        path = next(Path(rep_dir).glob(f"metrics_{key}.json"), None)
-        if path: m[key] = read_json(path)
-    return m
 
-def summary_from_metrics(mj):
-    out = {}
-    for k,v in mj.items():
-        rep = v.get("classification_report",{}) if v else {}
-        s_typed = rep.get("macro avg",{}).get("f1-score", None)
-        out[f"macroF1_{k}"] = s_typed
-        out[f"n_eval_{k}"] = v.get("n_eval_edges") if v else None
-        out[f"n_uncertain_{k}"] = v.get("n_uncertain_pred") if v else 0
+def load_metrics(rep_dir: Path) -> dict[str, dict | None]:
+    keys = {
+        "ours_physical": "metrics_ours_physical.json",
+        "semconv_physical": "metrics_semconv_physical.json",
+        "timing_physical": "metrics_timing_physical.json",
+        "ours_semconv_drop": "metrics_ours_semconv_drop.json",
+        "ours_timing_drop": "metrics_ours_timing_drop.json",
+    }
+    out: dict[str, dict | None] = {}
+    for key, fname in keys.items():
+        path = rep_dir / fname
+        out[key] = read_json(path) if path.exists() else None
     return out
 
-def load_plans(rep_dir):
-    typed = Path(rep_dir)/"plan_physical.csv"
-    block = Path(rep_dir)/"plan_all_blocking.csv"
-    pt = pd.read_csv(typed) if typed.exists() else None
-    pb = pd.read_csv(block) if block.exists() else None
-    def score(df):
-        if df is None: return {}
-        if not {"target","IBS","DBS"}.issubset(df.columns): return {}
-        s = df.groupby("target", as_index=False).agg(score=("IBS", "sum"))
-        s2 = df.groupby("target", as_index=False).agg(DBS=("DBS","sum"))
-        s = s.merge(s2, on="target", how="left"); s["score"]=s["score"]+s["DBS"].fillna(0)
-        return dict(zip(s["target"], s["score"]))
-    return score(pt), score(pb)
 
-def load_live(rep_dir):
-    obs = read_json(Path(rep_dir)/"observations.json") or {}
-    segs = {s.get("name"): s for s in obs.get("segments",[])}
-    base = segs.get("baseline",{})
-    base_counts = base.get("by_service") or base.get("by_service_top") or {}
-    impacts = {}
-    for name, seg in segs.items():
-        if not name.startswith("fault:"): continue
-        fcounts = seg.get("by_service") or seg.get("by_service_top") or {}
-        # relative change on counts (per-second normalization is upstream in observe if needed)
-        all_svc = set(base_counts) | set(fcounts)
-        for svc in all_svc:
-            b = float(base_counts.get(svc, 0))
-            f = float(fcounts.get(svc, 0))
-            val = abs(f-b) / (b if b>0 else 1.0)
-            impacts.setdefault(name, {})[svc] = val
-    return impacts  # dict fault -> {service -> impact}
+def summary_from_metrics(metrics: dict[str, dict | None]) -> dict[str, float | None]:
+    out: dict[str, float | None] = {}
+    for key, data in metrics.items():
+        if not data:
+            out[f"macroF1_{key}"] = None
+            out[f"n_eval_{key}"] = None
+            out[f"n_uncertain_{key}"] = None
+            continue
+        report = data.get("classification_report", {})
+        macro = report.get("macro avg", {})
+        out[f"macroF1_{key}"] = float(macro.get("f1-score")) if macro.get("f1-score") is not None else None
+        out[f"n_eval_{key}"] = data.get("n_eval_edges")
+        out[f"n_uncertain_{key}"] = data.get("n_uncertain_pred")
+    return out
 
-def rank_spearman(a, b):
-    # simple spearman without scipy
-    if not a or not b: return None
-    common = list(set(a) & set(b))
-    if len(common) < 3: return None
-    sa = pd.Series([a[t] for t in common]).rank()
-    sb = pd.Series([b[t] for t in common]).rank()
-    return float(sa.corr(sb, method='pearson'))
 
-def precision_at_k(scores, target, k):
-    if not scores or target not in scores: return None
-    top = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
-    return 1.0 if any(t==target for t,_ in top) else 0.0
+def _counts_per_sec(segment: dict[str, Any] | None) -> tuple[dict[str, float], float]:
+    if not segment:
+        return {}, 0.0
+    counts_raw = segment.get("by_service") or segment.get("by_service_top") or {}
+    counts = {str(k): float(v) for k, v in counts_raw.items()}
+    duration_s = float(segment.get("duration_s") or 0.0)
+    if duration_s <= 0:
+        duration_ns = segment.get("duration_ns")
+        if duration_ns:
+            try:
+                duration_s = float(duration_ns) / 1_000_000_000
+            except Exception:
+                duration_s = 0.0
+    if duration_s <= 0:
+        s = segment.get("start_ns")
+        e = segment.get("end_ns")
+        if isinstance(s, (int, float)) and isinstance(e, (int, float)) and e > s:
+            duration_s = (float(e) - float(s)) / 1_000_000_000
+    if duration_s <= 0:
+        duration_s = 1.0
+    per_sec = {svc: cnt / duration_s for svc, cnt in counts.items()}
+    return per_sec, duration_s
 
-def main():
+
+def _sym_delta(base: float, fault: float) -> float:
+    denom = (abs(base) + abs(fault)) / 2.0
+    if denom <= 0:
+        return 0.0
+    return abs(fault - base) / denom
+
+
+def _resolve_target(seg: dict[str, Any], deltas: dict[str, float]) -> str | None:
+    if seg.get("target_service"):
+        return str(seg["target_service"])
+    name = str(seg.get("name", ""))
+    if ":" in name:
+        return name.split(":", 1)[1]
+    if deltas:
+        return max(deltas.items(), key=lambda kv: kv[1])[0]
+    return None
+
+
+def load_live(rep_dir: Path) -> dict[str, Any] | None:
+    obs = read_json(rep_dir / "observations.json") or {}
+    segments = obs.get("segments", [])
+    if not segments:
+        return None
+    baseline = None
+    for seg in segments:
+        if str(seg.get("name", "")).lower().startswith("baseline"):
+            baseline = seg
+            break
+    if baseline is None:
+        baseline = segments[0]
+    base_per_sec, _ = _counts_per_sec(baseline)
+
+    faults: list[dict[str, Any]] = []
+    for seg in segments:
+        if seg is baseline:
+            continue
+        per_sec_fault, duration_s = _counts_per_sec(seg)
+        deltas = {
+            svc: _sym_delta(base_per_sec.get(svc, 0.0), per_sec_fault.get(svc, 0.0))
+            for svc in set(base_per_sec) | set(per_sec_fault)
+        }
+        faults.append(
+            {
+                "name": seg.get("name"),
+                "target": _resolve_target(seg, deltas),
+                "per_sec": per_sec_fault,
+                "delta": deltas,
+                "duration_s": duration_s,
+            }
+        )
+    return {"baseline_per_sec": base_per_sec, "faults": faults}
+
+
+def load_plans(rep_dir: Path) -> tuple[dict[str, float], dict[str, float]]:
+    typed_path = rep_dir / "plan_physical.csv"
+    block_path = rep_dir / "plan_all_blocking.csv"
+
+    def _scores(path: Path, score_col: str) -> dict[str, float]:
+        if not path.exists():
+            return {}
+        df = pd.read_csv(path)
+        if "target" not in df.columns:
+            return {}
+        for col in ["IBS", "DBS"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        if score_col not in df.columns:
+            df[score_col] = df.get("IBS", 0.0) + df.get("DBS", 0.0)
+        df["target"] = df["target"].astype(str)
+        return dict(zip(df["target"], df[score_col].astype(float)))
+
+    return _scores(typed_path, "typed_score"), _scores(block_path, "blocking_score")
+
+
+def rank_corr(scores: dict[str, float], impacts: dict[str, float], method: str) -> float | None:
+    common = sorted(set(scores) & set(impacts))
+    if len(common) < 2:
+        return None
+    s_scores = pd.Series([scores[k] for k in common])
+    s_imp = pd.Series([impacts[k] for k in common])
+    val = s_scores.corr(s_imp, method=method)
+    if pd.isna(val):
+        return None
+    return float(val)
+
+
+def precision_at_k(scores: dict[str, float], target: str | None, k: int) -> float | None:
+    if not target or target not in scores:
+        return None
+    ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    top = [svc for svc, _ in ordered[:k]]
+    return 1.0 if target in top else 0.0
+
+
+def win_rate(pairs: Iterable[tuple[float | None, float | None]]) -> float | None:
+    wins = 0
+    total = 0
+    for typed, block in pairs:
+        if typed is None or block is None:
+            continue
+        total += 1
+        if typed > block:
+            wins += 1
+    if total == 0:
+        return None
+    return wins / total
+
+
+def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--replicas-dir", required=True)
-    ap.add_argument("--outdir", required=True)
+    ap.add_argument("--replicas-dir", required=True, type=Path)
+    ap.add_argument("--outdir", required=True, type=Path)
     args = ap.parse_args()
-    outdir = Path(args.outdir); data = outdir/"data"; data.mkdir(parents=True, exist_ok=True)
 
-    rows = []
-    spearman_typed, spearman_block = [], []
-    p3_typed, p3_block, p5_typed, p5_block = [], [], [], []
+    outdir: Path = args.outdir
+    data_dir = outdir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
 
-    for rep_dir in sorted(Path(args.replicas_dir).glob("replicate-*")):
-        mets = load_metrics(rep_dir)
-        row = {"replica": rep_dir.name}
-        row.update(summary_from_metrics(mets))
-        # plans + live
-        s_typed, s_block = load_plans(rep_dir)
-        live = load_live(rep_dir)  # fault -> {svc -> impact}
-        # global spearman on union over faults (average per svc impact)
-        if live:
-            imp_all = {}
-            for d in live.values():
-                for svc,val in d.items():
-                    imp_all.setdefault(svc, []).append(val)
-            imp_avg = {svc: sum(v)/len(v) for svc,v in imp_all.items()}
-            sp_t = rank_spearman(s_typed, imp_avg)
-            sp_b = rank_spearman(s_block, imp_avg)
-            row["spearman_typed"] = sp_t
-            row["spearman_block"] = sp_b
-            if sp_t is not None: spearman_typed.append(sp_t)
-            if sp_b is not None: spearman_block.append(sp_b)
-            # per-fault p@k (k=3,5), averaged over faults
-            p3_t = []; p3_b = []; p5_t = []; p5_b = []
-            for fname, imp in live.items():
-                # fault target from name if encoded as "fault:service"
-                target = fname.split(":",1)[1] if ":" in fname else None
-                if target:
-                    pt3 = precision_at_k(s_typed, target, 3)
-                    pb3 = precision_at_k(s_block, target, 3)
-                    pt5 = precision_at_k(s_typed, target, 5)
-                    pb5 = precision_at_k(s_block, target, 5)
-                    if pt3 is not None: p3_t.append(pt3)
-                    if pb3 is not None: p3_b.append(pb3)
-                    if pt5 is not None: p5_t.append(pt5)
-                    if pb5 is not None: p5_b.append(pb5)
-            row["p_at_3_typed"] = sum(p3_t)/len(p3_t) if p3_t else None
-            row["p_at_3_block"] = sum(p3_b)/len(p3_b) if p3_b else None
-            row["p_at_5_typed"] = sum(p5_t)/len(p5_t) if p5_t else None
-            row["p_at_5_block"] = sum(p5_b)/len(p5_b) if p5_b else None
-            if row["p_at_3_typed"] is not None: p3_typed.append(row["p_at_3_typed"])
-            if row["p_at_3_block"] is not None: p3_block.append(row["p_at_3_block"])
-            if row["p_at_5_typed"] is not None: p5_typed.append(row["p_at_5_typed"])
-            if row["p_at_5_block"] is not None: p5_block.append(row["p_at_5_block"])
+    rows: list[dict[str, Any]] = []
+    spearman_typed_vals: list[float] = []
+    spearman_block_vals: list[float] = []
+    kendall_typed_vals: list[float] = []
+    kendall_block_vals: list[float] = []
+    spearman_pairs: list[tuple[float | None, float | None]] = []
+    kendall_pairs: list[tuple[float | None, float | None]] = []
+    p3_typed_vals: list[float] = []
+    p3_block_vals: list[float] = []
+    p5_typed_vals: list[float] = []
+    p5_block_vals: list[float] = []
+
+    replicas_dir: Path = args.replicas_dir
+    for rep_dir in sorted(replicas_dir.glob("replicate-*")):
+        metrics = load_metrics(rep_dir)
+        row: dict[str, Any] = {"replica": rep_dir.name}
+        row.update(summary_from_metrics(metrics))
+
+        typed_scores, block_scores = load_plans(rep_dir)
+        live = load_live(rep_dir)
+
+        pooled_impacts: dict[str, float] = {}
+        fault_metrics: list[dict[str, float | None]] = []
+        if live and live.get("faults"):
+            accum: dict[str, list[float]] = {}
+            for fault in live["faults"]:
+                deltas: dict[str, float] = fault.get("delta", {})
+                for svc, val in deltas.items():
+                    accum.setdefault(svc, []).append(val)
+
+                spearman_fault_t = rank_corr(typed_scores, deltas, "spearman")
+                spearman_fault_b = rank_corr(block_scores, deltas, "spearman")
+                kendall_fault_t = rank_corr(typed_scores, deltas, "kendall")
+                kendall_fault_b = rank_corr(block_scores, deltas, "kendall")
+                p3_t = precision_at_k(typed_scores, fault.get("target"), 3)
+                p3_b = precision_at_k(block_scores, fault.get("target"), 3)
+                p5_t = precision_at_k(typed_scores, fault.get("target"), 5)
+                p5_b = precision_at_k(block_scores, fault.get("target"), 5)
+
+                fault_metrics.append(
+                    {
+                        "spearman_typed": spearman_fault_t,
+                        "spearman_block": spearman_fault_b,
+                        "kendall_typed": kendall_fault_t,
+                        "kendall_block": kendall_fault_b,
+                        "p_at_3_typed": p3_t,
+                        "p_at_3_block": p3_b,
+                        "p_at_5_typed": p5_t,
+                        "p_at_5_block": p5_b,
+                    }
+                )
+
+                for val_list, val in ((p3_typed_vals, p3_t), (p3_block_vals, p3_b), (p5_typed_vals, p5_t), (p5_block_vals, p5_b)):
+                    if val is not None:
+                        val_list.append(val)
+
+            pooled_impacts = {svc: mean(vals) for svc, vals in accum.items() if vals}
+
+            row["spearman_typed"] = rank_corr(typed_scores, pooled_impacts, "spearman")
+            row["spearman_block"] = rank_corr(block_scores, pooled_impacts, "spearman")
+            row["kendall_typed"] = rank_corr(typed_scores, pooled_impacts, "kendall")
+            row["kendall_block"] = rank_corr(block_scores, pooled_impacts, "kendall")
+
+            if fault_metrics:
+                row["p_at_3_typed"] = mean([fm["p_at_3_typed"] for fm in fault_metrics if fm["p_at_3_typed"] is not None]) if any(fm["p_at_3_typed"] is not None for fm in fault_metrics) else None
+                row["p_at_3_block"] = mean([fm["p_at_3_block"] for fm in fault_metrics if fm["p_at_3_block"] is not None]) if any(fm["p_at_3_block"] is not None for fm in fault_metrics) else None
+                row["p_at_5_typed"] = mean([fm["p_at_5_typed"] for fm in fault_metrics if fm["p_at_5_typed"] is not None]) if any(fm["p_at_5_typed"] is not None for fm in fault_metrics) else None
+                row["p_at_5_block"] = mean([fm["p_at_5_block"] for fm in fault_metrics if fm["p_at_5_block"] is not None]) if any(fm["p_at_5_block"] is not None for fm in fault_metrics) else None
+
+        spearman_pairs.append((row.get("spearman_typed"), row.get("spearman_block")))
+        kendall_pairs.append((row.get("kendall_typed"), row.get("kendall_block")))
+
+        if row.get("spearman_typed") is not None:
+            spearman_typed_vals.append(row["spearman_typed"])
+        if row.get("spearman_block") is not None:
+            spearman_block_vals.append(row["spearman_block"])
+        if row.get("kendall_typed") is not None:
+            kendall_typed_vals.append(row["kendall_typed"])
+        if row.get("kendall_block") is not None:
+            kendall_block_vals.append(row["kendall_block"])
+
         rows.append(row)
 
     df = pd.DataFrame(rows)
-    df.to_csv(data/"replicas_summary.csv", index=False)
+    df.to_csv(data_dir / "replicas_summary.csv", index=False)
 
-    # aggregates
-    agg = {
-      "n_replicas": int(len(df)),
-      "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_")},
-      "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_")},
-      "spearman_mean_typed": float(pd.Series(spearman_typed).mean()) if spearman_typed else None,
-      "spearman_mean_block": float(pd.Series(spearman_block).mean()) if spearman_block else None,
-      "spearman_winrate": float(sum(1 for t,b in zip(spearman_typed, spearman_block) if t is not None and b is not None and t>b) / max(1,len(spearman_typed))) if spearman_typed and spearman_block else None,
-      "p_at_3_mean_typed": float(pd.Series(p3_typed).mean()) if p3_typed else None,
-      "p_at_3_mean_block": float(pd.Series(p3_block).mean()) if p3_block else None,
-      "p_at_5_mean_typed": float(pd.Series(p5_typed).mean()) if p5_typed else None,
-      "p_at_5_mean_block": float(pd.Series(p5_block).mean()) if p5_block else None
+    agg: dict[str, Any] = {
+        "n_replicas": int(len(df)),
+        "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_") and not df[c].dropna().empty},
+        "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_") and not df[c].dropna().empty},
+        "spearman_mean_typed": float(pd.Series(spearman_typed_vals).mean()) if spearman_typed_vals else None,
+        "spearman_mean_block": float(pd.Series(spearman_block_vals).mean()) if spearman_block_vals else None,
+        "kendall_mean_typed": float(pd.Series(kendall_typed_vals).mean()) if kendall_typed_vals else None,
+        "kendall_mean_block": float(pd.Series(kendall_block_vals).mean()) if kendall_block_vals else None,
+        "spearman_winrate": win_rate(spearman_pairs),
+        "kendall_winrate": win_rate(kendall_pairs),
+        "p_at_3_mean_typed": float(pd.Series(p3_typed_vals).mean()) if p3_typed_vals else None,
+        "p_at_3_mean_block": float(pd.Series(p3_block_vals).mean()) if p3_block_vals else None,
+        "p_at_5_mean_typed": float(pd.Series(p5_typed_vals).mean()) if p5_typed_vals else None,
+        "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
     }
-    # bootstrap CIs
-    for key, vec in [("spearman_typed", spearman_typed), ("spearman_block", spearman_block),
-                     ("p_at_3_typed", p3_typed), ("p_at_3_block", p3_block),
-                     ("p_at_5_typed", p5_typed), ("p_at_5_block", p5_block)]:
-        lo, hi = bootstrap_ci(list(vec))
-        agg[f"{key}_ci95"] = [lo, hi] if lo is not None else None
 
-    (data/"aggregate_summary.json").write_text(json.dumps(agg, indent=2))
+    for key, vec in [
+        ("spearman_typed", spearman_typed_vals),
+        ("spearman_block", spearman_block_vals),
+        ("kendall_typed", kendall_typed_vals),
+        ("kendall_block", kendall_block_vals),
+        ("p_at_3_typed", p3_typed_vals),
+        ("p_at_3_block", p3_block_vals),
+        ("p_at_5_typed", p5_typed_vals),
+        ("p_at_5_block", p5_block_vals),
+    ]:
+        lo, hi = bootstrap_ci(vec)
+        agg[f"{key}_ci95"] = [lo, hi] if lo is not None and hi is not None else None
 
-    # HTML (compact)
+    (data_dir / "aggregate_summary.json").write_text(json.dumps(agg, indent=2))
+
+    def fmt(val: float | None) -> str:
+        return "n/a" if val is None else f"{val:.3f}"
+
     html = f"""<!doctype html><meta charset="utf-8">
 <title>EdgeTyper — Aggregate (256×, soak 1800s)</title>
 <style>body{{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}}table{{border-collapse:collapse}}td,th{{border:1px solid #ddd;padding:6px 10px}}</style>
 <h1>EdgeTyper — Aggregate (n={agg['n_replicas']}, soak=1800s)</h1>
 <h2>Typing quality</h2>
-<p>Macro-F1 means (higher is better):</p>
 <ul>
-<li>Ours — physical: {agg['macroF1_means'].get('macroF1_ours_physical')}</li>
-<li>SemConv baseline: {agg['macroF1_means'].get('macroF1_semconv_physical')}</li>
-<li>Timing baseline: {agg['macroF1_means'].get('macroF1_timing_physical')}</li>
-<li>Ours — SemConv dropped: {agg['macroF1_means'].get('macroF1_ours_semconv_drop')}</li>
-<li>Ours — Timing dropped: {agg['macroF1_means'].get('macroF1_ours_timing_drop')}</li>
+  <li>Ours — physical: {fmt(agg['macroF1_means'].get('macroF1_ours_physical'))}</li>
+  <li>SemConv baseline: {fmt(agg['macroF1_means'].get('macroF1_semconv_physical'))}</li>
+  <li>Timing baseline: {fmt(agg['macroF1_means'].get('macroF1_timing_physical'))}</li>
+  <li>Ours — SemConv dropped: {fmt(agg['macroF1_means'].get('macroF1_ours_semconv_drop'))}</li>
+  <li>Ours — Timing dropped: {fmt(agg['macroF1_means'].get('macroF1_ours_timing_drop'))}</li>
 </ul>
-<h2>Prediction vs live (rank, pooled)</h2>
-<table><tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Win rate (typed&gt;block)</th></tr>
-<tr><td>Spearman ρ (mean)</td><td>{agg['spearman_mean_typed']}</td><td>{agg['spearman_mean_block']}</td><td>{agg['spearman_winrate']}</td></tr>
+<h2>Prediction vs live (pooled)</h2>
+<table>
+  <tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Win rate (typed &gt; block)</th></tr>
+  <tr><td>Spearman ρ (mean)</td><td>{fmt(agg['spearman_mean_typed'])}</td><td>{fmt(agg['spearman_mean_block'])}</td><td>{fmt(agg['spearman_winrate'])}</td></tr>
+  <tr><td>Kendall τ (mean)</td><td>{fmt(agg['kendall_mean_typed'])}</td><td>{fmt(agg['kendall_mean_block'])}</td><td>{fmt(agg['kendall_winrate'])}</td></tr>
 </table>
-<p>95% CIs (bootstrap): ρ_typed={agg.get('spearman_typed_ci95')}, ρ_block={agg.get('spearman_block_ci95')}</p>
+<p>95% CIs: ρ_typed={agg.get('spearman_typed_ci95')}, ρ_block={agg.get('spearman_block_ci95')}<br>
+τ_typed={agg.get('kendall_typed_ci95')}, τ_block={agg.get('kendall_block_ci95')}</p>
 <h2>Top-k hit rate</h2>
-<table><tr><th></th><th>Typed</th><th>All-blocking</th></tr>
-<tr><td>P@3 (mean)</td><td>{agg['p_at_3_mean_typed']}</td><td>{agg['p_at_3_mean_block']}</td></tr>
-<tr><td>P@5 (mean)</td><td>{agg['p_at_5_mean_typed']}</td><td>{agg['p_at_5_mean_block']}</td></tr>
+<table>
+  <tr><th></th><th>Typed</th><th>All-blocking</th></tr>
+  <tr><td>P@3 (mean)</td><td>{fmt(agg['p_at_3_mean_typed'])}</td><td>{fmt(agg['p_at_3_mean_block'])}</td></tr>
+  <tr><td>P@5 (mean)</td><td>{fmt(agg['p_at_5_mean_typed'])}</td><td>{fmt(agg['p_at_5_mean_block'])}</td></tr>
 </table>
 <p>95% CIs: P@3_typed={agg.get('p_at_3_typed_ci95')}, P@3_block={agg.get('p_at_3_block_ci95')}<br>
 P@5_typed={agg.get('p_at_5_typed_ci95')}, P@5_block={agg.get('p_at_5_block_ci95')}</p>
 <h2>Downloads</h2>
 <ul>
-<li><a href="data/aggregate_summary.json" download>aggregate_summary.json</a></li>
-<li><a href="data/replicas_summary.csv" download>replicas_summary.csv</a></li>
+  <li><a href="data/aggregate_summary.json" download>aggregate_summary.json</a></li>
+  <li><a href="data/replicas_summary.csv" download>replicas_summary.csv</a></li>
 </ul>
 """
-    (outdir/"index.html").write_text(html)
+
+    (outdir / "index.html").write_text(html)
+
 
 if __name__ == "__main__":
     main()

@@ -188,8 +188,8 @@ jobs:
           {
             "segments": [
               {"name":"baseline","start_ns": $BASE_START, "end_ns": $BASE_END},
-              {"name":"consumer_down","start_ns": $CONS_START, "end_ns": $CONS_END},
-              {"name":"broker_paused","start_ns": $BROK_START, "end_ns": $BROK_END}
+              {"name":"consumer_down","target_service":"fraud-detection","start_ns": $CONS_START, "end_ns": $CONS_END},
+              {"name":"broker_paused","target_service":"kafka","start_ns": $BROK_START, "end_ns": $BROK_END}
             ]
           }
           JSON

@@ -664,6 +664,10 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     if plan_csv:
         try:
             typed_plan_df = pd.read_csv(plan_csv)
+            for col in ["IBS", "DBS"]:
+                if col in typed_plan_df.columns:
+                    typed_plan_df[col] = pd.to_numeric(typed_plan_df[col], errors="coerce").fillna(0.0)
+            typed_plan_df["typed_score"] = typed_plan_df.get("IBS", 0.0) + typed_plan_df.get("DBS", 0.0)
             typed_plan_df = typed_plan_df.sort_values(["IBS", "DBS"], ascending=False)
             (assets / "plan_physical.csv").write_text(typed_plan_df.to_csv(index=False))
             rows = ""
@@ -682,6 +686,12 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     if plan_blocking_csv:
         try:
             blocking_plan_df = pd.read_csv(plan_blocking_csv)
+            for col in ["IBS", "DBS"]:
+                if col in blocking_plan_df.columns:
+                    blocking_plan_df[col] = pd.to_numeric(blocking_plan_df[col], errors="coerce").fillna(0.0)
+            blocking_plan_df["blocking_score"] = (
+                blocking_plan_df.get("IBS", 0.0) + blocking_plan_df.get("DBS", 0.0)
+            )
             blocking_plan_df = blocking_plan_df.sort_values(["IBS", "DBS"], ascending=False)
             (assets / "plan_all_blocking.csv").write_text(blocking_plan_df.to_csv(index=False))
         except Exception:
@@ -717,143 +727,279 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         and live_data.get("ok")
     ):
         try:
-            typed_cols = (
-                typed_plan_df.loc[:, ["target", "kind", "IBS", "DBS"]]
-                .rename(
-                    columns={
-                        "kind": "kind_typed",
-                        "IBS": "IBS_typed",
-                        "DBS": "DBS_typed",
-                    }
-                )
-                .copy()
-            )
-            for col in ["IBS_typed", "DBS_typed"]:
-                typed_cols[col] = pd.to_numeric(typed_cols[col], errors="coerce").fillna(0.0)
-            typed_cols["typed_score"] = typed_cols["IBS_typed"] + typed_cols["DBS_typed"]
+            typed_cols = typed_plan_df.copy()
+            block_cols = blocking_plan_df.copy()
 
-            block_cols = (
-                blocking_plan_df.loc[:, ["target", "kind", "IBS", "DBS"]]
-                .rename(
-                    columns={
-                        "kind": "kind_blocking",
-                        "IBS": "IBS_blocking",
-                        "DBS": "DBS_blocking",
-                    }
-                )
-                .copy()
+            keep_cols_typed = ["target", "kind", "IBS", "DBS", "typed_score", "ib_edges_top", "db_edges_top"]
+            keep_cols_block = ["target", "kind", "IBS", "DBS", "blocking_score"]
+            typed_cols = typed_cols[[c for c in keep_cols_typed if c in typed_cols.columns]]
+            block_cols = block_cols[[c for c in keep_cols_block if c in block_cols.columns]]
+
+            typed_cols = typed_cols.rename(
+                columns={
+                    "kind": "kind_typed",
+                    "IBS": "IBS_typed",
+                    "DBS": "DBS_typed",
+                    "ib_edges_top": "ib_edges_top_typed",
+                    "db_edges_top": "db_edges_top_typed",
+                }
             )
-            for col in ["IBS_blocking", "DBS_blocking"]:
-                block_cols[col] = pd.to_numeric(block_cols[col], errors="coerce").fillna(0.0)
-            block_cols["blocking_score"] = block_cols["IBS_blocking"] + block_cols["DBS_blocking"]
+            block_cols = block_cols.rename(
+                columns={
+                    "kind": "kind_blocking",
+                    "IBS": "IBS_blocking",
+                    "DBS": "DBS_blocking",
+                }
+            )
 
             comp = typed_cols.merge(block_cols, on="target", how="outer")
-            comp["kind"] = comp.get("kind_typed").fillna(comp.get("kind_blocking"))
-            comp["kind"] = comp["kind"].fillna("app")
-
-            baseline_counts: dict[str, float] = {}
-            for seg in live_data.get("segments", []):
-                name = str(seg.get("name", "")).lower()
-                counts = seg.get("by_service_top", {}) or {}
-                if "baseline" in name:
-                    baseline_counts = {k: float(v) for k, v in counts.items()}
-                    break
-            if not baseline_counts and live_data.get("segments"):
-                first = live_data["segments"][0].get("by_service_top", {}) or {}
-                baseline_counts = {k: float(v) for k, v in first.items()}
-
-            impacts: dict[str, float] = {}
-            for seg in live_data.get("segments", []):
-                name = str(seg.get("name", "")).lower()
-                counts = seg.get("by_service_top", {}) or {}
-                if "baseline" in name and baseline_counts:
-                    continue
-                for svc, count in counts.items():
-                    try:
-                        cnt = float(count)
-                    except Exception:
-                        cnt = 0.0
-                    base = baseline_counts.get(svc, 0.0)
-                    delta = max(0.0, cnt - base)
-                    if delta == 0.0 and cnt > 0.0 and svc not in baseline_counts:
-                        delta = cnt
-                    impacts[svc] = max(impacts.get(svc, 0.0), delta)
-
-            live_df = pd.DataFrame([[svc, val] for svc, val in impacts.items()], columns=["target", "live_impact"])
-            comp = comp.merge(live_df, on="target", how="left")
+            comp["kind"] = comp.get("kind_typed").fillna(comp.get("kind_blocking")).fillna("app")
             for col in [
-                "typed_score",
-                "blocking_score",
                 "IBS_typed",
                 "DBS_typed",
+                "typed_score",
                 "IBS_blocking",
                 "DBS_blocking",
-                "live_impact",
+                "blocking_score",
             ]:
-                comp[col] = pd.to_numeric(comp[col], errors="coerce").fillna(0.0)
+                if col in comp.columns:
+                    comp[col] = pd.to_numeric(comp[col], errors="coerce").fillna(0.0)
 
-            comp = comp[
-                [
-                    "target",
-                    "kind",
-                    "IBS_typed",
-                    "DBS_typed",
-                    "typed_score",
-                    "IBS_blocking",
-                    "DBS_blocking",
-                    "blocking_score",
-                    "live_impact",
-                ]
-            ].drop_duplicates(subset=["target"])
+            typed_score_map = {
+                str(row.target): float(row.typed_score)
+                for row in comp.itertuples(index=False)
+                if getattr(row, "typed_score", None) is not None
+            }
+            block_score_map = {
+                str(row.target): float(row.blocking_score)
+                for row in comp.itertuples(index=False)
+                if getattr(row, "blocking_score", None) is not None
+            }
 
-            comp_sorted = comp.sort_values("typed_score", ascending=False).reset_index(drop=True)
-            (assets / "resilience_compare.csv").write_text(comp_sorted.to_csv(index=False))
+            def _counts_per_sec(seg: dict[str, object] | None) -> tuple[dict[str, float], dict[str, float], float]:
+                if not seg:
+                    return {}, {}, 0.0
+                counts_raw = seg.get("by_service") or seg.get("by_service_top") or {}
+                counts = {str(k): float(v) for k, v in counts_raw.items()}
+                duration_s = float(seg.get("duration_s") or 0.0)
+                if duration_s <= 0:
+                    duration_ns = seg.get("duration_ns")
+                    try:
+                        duration_s = float(duration_ns) / 1_000_000_000 if duration_ns else 0.0
+                    except Exception:
+                        duration_s = 0.0
+                if duration_s <= 0:
+                    s = seg.get("start_ns")
+                    e = seg.get("end_ns")
+                    if isinstance(s, (int, float)) and isinstance(e, (int, float)) and e > s:
+                        duration_s = (float(e) - float(s)) / 1_000_000_000
+                if duration_s <= 0:
+                    duration_s = 1.0
+                per_sec = {svc: cnt / duration_s for svc, cnt in counts.items()}
+                return counts, per_sec, duration_s
 
-            corr_df = comp_sorted[
-                (comp_sorted[["typed_score", "blocking_score", "live_impact"]].abs().sum(axis=1)) > 0
-            ]
+            def _sym_delta(base: float, fault: float) -> float:
+                denom = (abs(base) + abs(fault)) / 2.0
+                if denom <= 0:
+                    return 0.0
+                return abs(fault - base) / denom
 
-            def _corr(col: str, method: str) -> float | None:
-                if len(corr_df) < 2:
+            segments = live_data.get("segments", [])
+            baseline_seg = None
+            for seg in segments:
+                if str(seg.get("name", "")).lower().startswith("baseline"):
+                    baseline_seg = seg
+                    break
+            if baseline_seg is None and segments:
+                baseline_seg = segments[0]
+
+            base_counts, base_per_sec, _ = _counts_per_sec(baseline_seg)
+
+            def _resolve_target(seg: dict[str, object], deltas: dict[str, float]) -> str | None:
+                explicit = seg.get("target_service")
+                if explicit:
+                    return str(explicit)
+                name = str(seg.get("name", ""))
+                if ":" in name:
+                    return name.split(":", 1)[1]
+                if deltas:
+                    return max(deltas.items(), key=lambda kv: kv[1])[0]
+                return None
+
+            def _corr(scores: dict[str, float], impacts: dict[str, float], method: str) -> float | None:
+                common = sorted(set(scores) & set(impacts))
+                if len(common) < 2:
                     return None
-                val = corr_df[col].corr(corr_df["live_impact"], method=method)
+                s_scores = pd.Series([scores[k] for k in common])
+                s_imp = pd.Series([impacts[k] for k in common])
+                val = s_scores.corr(s_imp, method=method)
                 if pd.isna(val):
                     return None
                 return float(val)
 
-            def _fmt_corr(val: float | None) -> str:
+            def _fmt(val: float | None) -> str:
                 return "n/a" if val is None else f"{val:.3f}"
 
-            spearman_typed = _corr("typed_score", "spearman")
-            spearman_blocking = _corr("blocking_score", "spearman")
-            kendall_typed = _corr("typed_score", "kendall")
-            kendall_blocking = _corr("blocking_score", "kendall")
+            def _precision_at_k(scores: dict[str, float], target: str | None, k: int) -> float | None:
+                if not target or target not in scores:
+                    return None
+                ordered = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+                top = [svc for svc, _ in ordered[:k]]
+                return 1.0 if target in top else 0.0
+
+            fault_imp_rows: list[dict[str, object]] = []
+            fault_metric_rows: list[dict[str, object]] = []
+            pooled_lists: dict[str, list[float]] = {}
+            max_impacts: dict[str, float] = {}
+            p3_typed_vals: list[float] = []
+            p3_block_vals: list[float] = []
+            p5_typed_vals: list[float] = []
+            p5_block_vals: list[float] = []
+
+            for seg in segments:
+                if seg is baseline_seg:
+                    continue
+                counts_fault, per_sec_fault, duration_fault = _counts_per_sec(seg)
+                deltas: dict[str, float] = {}
+                union = set(base_per_sec) | set(per_sec_fault)
+                for svc in union:
+                    deltas[svc] = _sym_delta(base_per_sec.get(svc, 0.0), per_sec_fault.get(svc, 0.0))
+                    pooled_lists.setdefault(svc, []).append(deltas[svc])
+                    max_impacts[svc] = max(max_impacts.get(svc, 0.0), deltas[svc])
+
+                target = _resolve_target(seg, deltas)
+
+                spearman_t = _corr(typed_score_map, deltas, "spearman")
+                spearman_b = _corr(block_score_map, deltas, "spearman")
+                kendall_t = _corr(typed_score_map, deltas, "kendall")
+                kendall_b = _corr(block_score_map, deltas, "kendall")
+                p3_t = _precision_at_k(typed_score_map, target, 3)
+                p3_b = _precision_at_k(block_score_map, target, 3)
+                p5_t = _precision_at_k(typed_score_map, target, 5)
+                p5_b = _precision_at_k(block_score_map, target, 5)
+
+                if p3_t is not None:
+                    p3_typed_vals.append(p3_t)
+                if p3_b is not None:
+                    p3_block_vals.append(p3_b)
+                if p5_t is not None:
+                    p5_typed_vals.append(p5_t)
+                if p5_b is not None:
+                    p5_block_vals.append(p5_b)
+
+                fault_metric_rows.append(
+                    {
+                        "fault": seg.get("name"),
+                        "target_service": target,
+                        "duration_s": duration_fault,
+                        "spearman_typed": spearman_t,
+                        "spearman_blocking": spearman_b,
+                        "kendall_typed": kendall_t,
+                        "kendall_blocking": kendall_b,
+                        "p_at_3_typed": p3_t,
+                        "p_at_3_blocking": p3_b,
+                        "p_at_5_typed": p5_t,
+                        "p_at_5_blocking": p5_b,
+                    }
+                )
+
+                for svc in sorted(union):
+                    fault_imp_rows.append(
+                        {
+                            "fault": seg.get("name"),
+                            "target_service": target,
+                            "service": svc,
+                            "baseline_per_sec": base_per_sec.get(svc, 0.0),
+                            "fault_per_sec": per_sec_fault.get(svc, 0.0),
+                            "sym_relative_delta": deltas.get(svc, 0.0),
+                        }
+                    )
+
+            pooled_impacts = {svc: sum(vals) / len(vals) for svc, vals in pooled_lists.items() if vals}
+            comp["max_live_delta"] = comp["target"].map(lambda s: max_impacts.get(str(s), 0.0))
+            comp["mean_live_delta"] = comp["target"].map(lambda s: pooled_impacts.get(str(s), 0.0))
+
+            comp_sorted = comp.sort_values(["typed_score", "blocking_score"], ascending=False).reset_index(drop=True)
+            (assets / "resilience_compare.csv").write_text(comp_sorted.to_csv(index=False))
+
+            if fault_imp_rows:
+                (assets / "per_fault_impacts.csv").write_text(pd.DataFrame(fault_imp_rows).to_csv(index=False))
+            if fault_metric_rows:
+                (assets / "per_fault_metrics.csv").write_text(pd.DataFrame(fault_metric_rows).to_csv(index=False))
+            if pooled_impacts:
+                pooled_df = pd.DataFrame(
+                    sorted(pooled_impacts.items(), key=lambda kv: kv[1], reverse=True),
+                    columns=["service", "mean_sym_relative_delta"],
+                )
+                (assets / "pooled_live_impacts.csv").write_text(pooled_df.to_csv(index=False))
+
+            pooled_spearman_t = _corr(typed_score_map, pooled_impacts, "spearman")
+            pooled_spearman_b = _corr(block_score_map, pooled_impacts, "spearman")
+            pooled_kendall_t = _corr(typed_score_map, pooled_impacts, "kendall")
+            pooled_kendall_b = _corr(block_score_map, pooled_impacts, "kendall")
+
+            mean_p3_t = sum(p3_typed_vals) / len(p3_typed_vals) if p3_typed_vals else None
+            mean_p3_b = sum(p3_block_vals) / len(p3_block_vals) if p3_block_vals else None
+            mean_p5_t = sum(p5_typed_vals) / len(p5_typed_vals) if p5_typed_vals else None
+            mean_p5_b = sum(p5_block_vals) / len(p5_block_vals) if p5_block_vals else None
+
+            html.append("<h2>Resilience prediction vs live</h2>")
+            html.append(
+                "<p>Pooled symmetric per-second deltas (averaged over faults): "
+                f"typed Spearman ρ={_fmt(pooled_spearman_t)}, "
+                f"all-blocking Spearman ρ={_fmt(pooled_spearman_b)}, "
+                f"typed Kendall τ={_fmt(pooled_kendall_t)}, "
+                f"all-blocking Kendall τ={_fmt(pooled_kendall_b)}, "
+                f"P@3 typed={_fmt(mean_p3_t)}, P@3 all-blocking={_fmt(mean_p3_b)}, "
+                f"P@5 typed={_fmt(mean_p5_t)}, P@5 all-blocking={_fmt(mean_p5_b)}.</p>"
+            )
 
             rows = ""
             for i, r in enumerate(comp_sorted.head(15).itertuples(index=False), 1):
                 rows += (
                     f"<tr><td>{i}</td><td>{r.target}</td><td>{r.kind}</td>"
-                    f"<td>{r.IBS_typed:.1f}</td><td>{r.DBS_typed:.1f}</td><td>{r.typed_score:.1f}</td>"
-                    f"<td>{r.IBS_blocking:.1f}</td><td>{r.DBS_blocking:.1f}</td><td>{r.blocking_score:.1f}</td>"
-                    f"<td>{r.live_impact:.1f}</td></tr>"
+                    f"<td>{getattr(r, 'IBS_typed', 0.0):.1f}</td><td>{getattr(r, 'DBS_typed', 0.0):.1f}</td><td>{getattr(r, 'typed_score', 0.0):.1f}</td>"
+                    f"<td>{getattr(r, 'IBS_blocking', 0.0):.1f}</td><td>{getattr(r, 'DBS_blocking', 0.0):.1f}</td><td>{getattr(r, 'blocking_score', 0.0):.1f}</td>"
+                    f"<td>{getattr(r, 'max_live_delta', 0.0):.3f}</td><td>{getattr(r, 'mean_live_delta', 0.0):.3f}</td></tr>"
                 )
 
-            html.append("<h2>Resilience prediction vs live</h2>")
-            html.append(
-                "<p>Rank correlation with observed micro-fault span deltas: "
-                f"typed Spearman ρ={_fmt_corr(spearman_typed)}, "
-                f"all-blocking Spearman ρ={_fmt_corr(spearman_blocking)}, "
-                f"typed Kendall τ={_fmt_corr(kendall_typed)}, "
-                f"all-blocking Kendall τ={_fmt_corr(kendall_blocking)}.</p>"
-            )
             html.append(
                 "<table><thead><tr><th>#</th><th>Target</th><th>Kind</th>"
                 "<th>Typed IBS</th><th>Typed DBS</th><th>Typed IBS+DBS</th>"
                 "<th>All-blocking IBS</th><th>All-blocking DBS</th><th>All-blocking IBS+DBS</th>"
-                "<th>Live Δ spans</th></tr></thead><tbody>" + rows + "</tbody></table>"
+                "<th>Max live Δ</th><th>Mean live Δ</th></tr></thead><tbody>" + rows + "</tbody></table>"
             )
+
+            if fault_metric_rows:
+                fault_table_rows = ""
+                for r in fault_metric_rows:
+                    fault_table_rows += (
+                        "<tr>"
+                        f"<td>{r['fault']}</td>"
+                        f"<td>{r.get('target_service') or '—'}</td>"
+                        f"<td>{_fmt(r.get('spearman_typed'))}</td>"
+                        f"<td>{_fmt(r.get('spearman_blocking'))}</td>"
+                        f"<td>{_fmt(r.get('kendall_typed'))}</td>"
+                        f"<td>{_fmt(r.get('kendall_blocking'))}</td>"
+                        f"<td>{_fmt(r.get('p_at_3_typed'))}</td>"
+                        f"<td>{_fmt(r.get('p_at_3_blocking'))}</td>"
+                        f"<td>{_fmt(r.get('p_at_5_typed'))}</td>"
+                        f"<td>{_fmt(r.get('p_at_5_blocking'))}</td>"
+                        "</tr>"
+                    )
+                html.append(
+                    "<h3>Per-fault rank quality</h3>"
+                    "<table><thead><tr><th>Fault</th><th>Target</th>"
+                    "<th>ρ typed</th><th>ρ all-block</th><th>τ typed</th><th>τ all-block</th>"
+                    "<th>P@3 typed</th><th>P@3 all-block</th><th>P@5 typed</th><th>P@5 all-block</th>"
+                    "</tr></thead><tbody>" + fault_table_rows + "</tbody></table>"
+                )
+
             html.append(
-                "<p><a href='data/resilience_compare.csv' download>Download resilience_compare.csv</a></p>"
+                "<p><a href='data/resilience_compare.csv' download>Download resilience_compare.csv</a> | "
+                "<a href='data/per_fault_metrics.csv' download>per_fault_metrics.csv</a> | "
+                "<a href='data/per_fault_impacts.csv' download>per_fault_impacts.csv</a> | "
+                "<a href='data/pooled_live_impacts.csv' download>pooled_live_impacts.csv</a></p>"
             )
         except Exception:
             pass
@@ -1053,12 +1199,31 @@ def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
         s, e = int(seg.get("start_ns", 0)), int(seg.get("end_ns", 0))
         df = spans[(spans["_ts"] >= s) & (spans["_ts"] <= e)]
         total = int(len(df))
-        by_service = (df.groupby(svc).size().sort_values(ascending=False).head(12).to_dict())
-        by_kind = (df.groupby("_kind").size().sort_values(ascending=False).to_dict())
+
+        duration_ns = max(0, e - s)
+        duration_s = duration_ns / 1_000_000_000 if duration_ns > 0 else 0.0
+
+        svc_counts = df.groupby(svc).size().sort_values(ascending=False) if total else pd.Series(dtype="int64")
+        by_service_all = {str(k): int(v) for k, v in svc_counts.items()}
+        by_service_top = {str(k): int(v) for k, v in svc_counts.head(12).items()}
+        if duration_s > 0:
+            by_service_per_sec = {k: float(v) / duration_s for k, v in by_service_all.items()}
+        else:
+            by_service_per_sec = {k: float(v) for k, v in by_service_all.items()}
+
+        by_kind = (
+            df.groupby("_kind").size().sort_values(ascending=False).to_dict()
+            if total
+            else {}
+        )
         result["segments"].append({
             "name": name, "start_ns": s, "end_ns": e,
+            "duration_ns": duration_ns,
+            "duration_s": duration_s,
             "total_spans": total,
-            "by_service_top": by_service,
+            "by_service": by_service_all,
+            "by_service_top": by_service_top,
+            "by_service_per_sec": by_service_per_sec,
             "by_kind": by_kind,
         })
 

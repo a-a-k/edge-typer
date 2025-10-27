@@ -131,8 +131,8 @@ jobs:
           # baseline: last 120s pre-tail
           seg.append({"name":"baseline","start_ns": tmax-3*W, "end_ns": tmax-2*W})
           # "fault" windows (if you inject faults they should align; if not, still produces comparable windows)
-          seg.append({"name":"fault:kafka","start_ns": tmax-2*W, "end_ns": tmax-1*W})
-          seg.append({"name":"fault:consumer","start_ns": tmax-1*W, "end_ns": tmax-0*W})
+          seg.append({"name":"fault:kafka","target_service":"kafka","start_ns": tmax-2*W, "end_ns": tmax-1*W})
+          seg.append({"name":"fault:consumer","target_service":"fraud-detection","start_ns": tmax-1*W, "end_ns": tmax-0*W})
           (Path(run/"segments.json")).write_text(json.dumps({"segments":seg}, indent=2))
           PY
           edgetyper observe --spans "${RUN_DIR}/spans.parquet" --segments "${RUN_DIR}/segments.json" --out "${RUN_DIR}/observations.json"
