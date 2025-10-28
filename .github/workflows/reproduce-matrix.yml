@@ -107,21 +107,19 @@ jobs:
           chmod 0777 "${RUN_DIR}/collector"
 
           COMPOSE="$DEMO_DIR/docker-compose.yml"
-          test -f "$COMPOSE" || COMPOSE="$DEMO_DIR/compose.yaml"
+          COMPOSE_OVERRIDE="$DEMO_DIR/docker-compose.override.yml"
+          COMPOSE_OPTS="-f $COMPOSE -f $COMPOSE_OVERRIDE"
           
-          docker compose -f "$COMPOSE" up --force-recreate --remove-orphans --detach
+          docker compose $COMPOSE_OPTS up --force-recreate --remove-orphans --detach
           echo "Soaking for ${SOAK_SECONDS}s..."
           sleep "${SOAK_SECONDS}"
-          
-          # show collector logs (first) for easy diagnosis
-          docker compose -f "$COMPOSE" logs --no-color --tail=2000 otel-collector || true
           
           test -s "${RUN_DIR}/collector/otel-traces.json" || {
             echo "ERROR: $(ls -lah ${RUN_DIR}/collector || true)"
             exit 1
           }
 
-          docker compose -f "$COMPOSE" down -v || true
+          docker compose $COMPOSE_OPTS down -v || true
         
           # 5) Verify trace JSON and extract to Parquet
           if [[ ! -s "${RUN_DIR}/collector/otel-traces.json" ]]; then
