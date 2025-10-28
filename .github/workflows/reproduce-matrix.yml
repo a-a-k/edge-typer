@@ -47,6 +47,12 @@ jobs:
           echo "REPL_ID=$REPL_ID" >> $GITHUB_ENV
           echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${REPL_ID}" >> $GITHUB_ENV
 
+      - name: Ensure run output dirs
+        run: |
+          set -eu
+          mkdir -p "${RUN_DIR}/collector"
+          mkdir -p "${RUN_DIR}/site/data"
+
       - name: Install package (editable)
         run: |
           python -m pip install --upgrade pip
@@ -164,7 +170,7 @@ jobs:
           edges["pred_label"]="sync"
           edges.to_csv(sys.argv[2], index=False)
           PY
-          "${RUN_DIR}/edges.parquet" "${RUN_DIR}/pred_all_blocking.csv"
+
           edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_all_blocking.csv" --out "${RUN_DIR}/plan_all_blocking.csv" --weight events --alpha-ack 1.0
           
           # Observe: build equal windows (baseline and two fault windows)
