@@ -1,4 +1,7 @@
 name: Reproduce (matrix 256)
+defaults:
+  run:
+    shell: bash
 
 on:
   workflow_dispatch:
@@ -59,11 +62,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e .
+          sudo apt-get update && sudo apt-get install -y jq
 
       - name: Capture & Analyze
         shell: bash
         env:
           DEMO_DIR: ${{ github.workspace }}/vendor/opentelemetry-demo
+          TARGET: ${{ matrix.target }}
+          SOAK_SECONDS: ${{ matrix.soak_seconds }}
+          SIZE_MB: ${{ matrix.traces_size_mb }}
         run: |
           set -euo pipefail
           mkdir -p "$RUN_DIR/collector"
@@ -200,9 +207,12 @@ jobs:
           print(round(sz/1024/1024,2))
           PY
           )
-          cat > "${RUN_DIR}/provenance.json" <<JSON
-          { "target": "otel-demo","soak_seconds": ${ SOAK_SECONDS },"traces_size_mb": ${ SIZE_MB } }
-          JSON
+          
+          jq -n \
+            --arg target "$TARGET" \
+            --argjson soak "$SOAK_SECONDS" \
+            --argjson size "$SIZE_MB" \
+            '{target: $target, soak_seconds: $soak, traces_size_mb: $size}' > run.json
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
