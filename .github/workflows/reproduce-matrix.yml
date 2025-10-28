@@ -47,12 +47,6 @@ jobs:
           echo "REPL_ID=$REPL_ID" >> $GITHUB_ENV
           echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${REPL_ID}" >> $GITHUB_ENV
 
-      - name: Ensure run output dirs
-        run: |
-          set -eu
-          mkdir -p "${RUN_DIR}/collector"
-          mkdir -p "${RUN_DIR}/site/data"
-
       - name: Install package (editable)
         run: |
           python -m pip install --upgrade pip
@@ -164,13 +158,12 @@ jobs:
           
           # Plans: ours vs all-blocking synthetic
           edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_ours.csv" --out "${RUN_DIR}/plan_physical.csv" --weight events --alpha-ack 1.0
-          python - <<'PY'
+          python - "${RUN_DIR}/edges.parquet" "${RUN_DIR}/pred_all_blocking.csv" <<'PY'
           import pandas as pd, sys
           edges = pd.read_parquet(sys.argv[1])[["src_service","dst_service"]].drop_duplicates()
           edges["pred_label"]="sync"
           edges.to_csv(sys.argv[2], index=False)
           PY
-
           edgetyper plan --edges "${RUN_DIR}/edges.parquet" --pred "${RUN_DIR}/pred_all_blocking.csv" --out "${RUN_DIR}/plan_all_blocking.csv" --weight events --alpha-ack 1.0
           
           # Observe: build equal windows (baseline and two fault windows)
@@ -187,8 +180,8 @@ jobs:
           { "name": "fault:kafka",    "target_service": "kafka",             "start_ns": tmax-2*W, "end_ns": tmax-1*W },
           { "name": "fault:consumer", "target_service": "fraud-detection",   "start_ns": tmax-1*W, "end_ns": tmax-0*W },
           ]
-            (run/"segments.json").write_text(json.dumps({"segments":segments}, indent=2))
-            PY
+          (run/"segments.json").write_text(json.dumps({"segments":segments}, indent=2))
+          PY
           edgetyper observe --spans "${RUN_DIR}/spans.parquet" --segments "${RUN_DIR}/segments.json" --out "${RUN_DIR}/observations.json"
       
           # Provenance (report size from JSON or fallback to Parquet)
