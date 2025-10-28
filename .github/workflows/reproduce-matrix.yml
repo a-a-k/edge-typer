@@ -47,6 +47,14 @@ jobs:
           echo "REPL_ID=$REPL_ID" >> $GITHUB_ENV
           echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${REPL_ID}" >> $GITHUB_ENV
 
+      - name: Ensure run output dirs
+        shell: bash
+        run: |
+          set -eu
+          # required by later steps (site build and otel collector bind-mount)
+          mkdir -p "${RUN_DIR}/collector"
+          mkdir -p "${RUN_DIR}/site/data"
+
       - name: Install package (editable)
         run: |
           python -m pip install --upgrade pip
