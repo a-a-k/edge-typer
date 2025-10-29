@@ -187,12 +187,16 @@ jobs:
           sp  = pd.read_parquet(run/"spans.parquet")
           ts  = [c for c in ["start_time_unix_nano","start_unix_nano","start_ns","time_unix_nano"] if c in sp.columns][0]
           tmin, tmax = int(sp[ts].min()), int(sp[ts].max())
-          W = 120 * 1_000_000_000
-          segments = [
-          { "name": "baseline",       "start_ns": tmax-3*W, "end_ns": tmax-2*W },
-          { "name": "fault:kafka",    "target_service": "kafka",             "start_ns": tmax-2*W, "end_ns": tmax-1*W },
-          { "name": "fault:consumer", "target_service": "fraud-detection",   "start_ns": tmax-1*W, "end_ns": tmax-0*W },
-          ]
+          SOAK = int(os.environ.get("SOAK_SECONDS", "180"))
+          W = max(1, SOAK // 3) * 1_000_000_000  # three equal windows within soak
+          windows = [( "baseline", None, 3), ("fault:kafka","kafka",2), ("fault:consumer","fraud-detection",1)]
+          segments=[]
+          for name,target,slot in windows:
+              start = max(tmin, tmax - slot*W)
+              end   = max(start+1, min(tmax, start+W))
+              seg = {"name": name, "start_ns": start, "end_ns": end}
+              if target: seg["target_service"] = target
+              segments.append(seg)
           (run/"segments.json").write_text(json.dumps({"segments":segments}, indent=2))
           PY
           edgetyper observe --spans "${RUN_DIR}/spans.parquet" --segments "${RUN_DIR}/segments.json" --out "${RUN_DIR}/observations.json"
@@ -208,11 +212,11 @@ jobs:
           PY
           )
           
-          jq -n \
-            --arg target "$TARGET" \
+            --arg  target "$TARGET" \
             --argjson soak "$SOAK_SECONDS" \
             --argjson size "$SIZE_MB" \
-            '{target: $target, soak_seconds: $soak, traces_size_mb: $size}' > run.json
+            '{target: $target, soak_seconds: $soak, traces_size_mb: $size}' \
+            > "${RUN_DIR}/provenance.json"
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
@@ -254,7 +258,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           pattern: replicate-*
-          merge-multiple: true
           path: replicas
 
       - name: Sanity-check downloaded artifacts
