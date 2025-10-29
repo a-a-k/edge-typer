@@ -236,6 +236,19 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install aggregator dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # EITHER pin to your requirements file (recommended)
+          if [ -f scripts/requirements-aggregate.txt ]; then
+            pip install -r scripts/requirements-aggregate.txt
+          elif [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          else
+            pip install "pandas>=2.2,<3.0"
+          fi    
 
       - name: Download all replica artifacts
         uses: actions/download-artifact@v4
