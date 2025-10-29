@@ -68,8 +68,8 @@ jobs:
         shell: bash
         env:
           DEMO_DIR: ${{ github.workspace }}/vendor/opentelemetry-demo
-          TARGET: ${{ matrix.target }}
-          SOAK_SECONDS: ${{ matrix.soak_seconds }}
+          TARGET: ${{ matrix.target || 'otel-demo' }}
+          SOAK_SECONDS: ${{ matrix.soak_seconds || env.SOAK_SECONDS }}
           SIZE_MB: ${{ matrix.traces_size_mb }}
         run: |
           set -euo pipefail
