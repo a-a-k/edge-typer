@@ -212,6 +212,7 @@ jobs:
           PY
           )
           
+          jq -n \
             --arg  target "$TARGET" \
             --argjson soak "$SOAK_SECONDS" \
             --argjson size "$SIZE_MB" \
