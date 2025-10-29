@@ -257,6 +257,13 @@ jobs:
           merge-multiple: true
           path: replicas
 
+      - name: Sanity-check downloaded artifacts
+        run: |
+          echo "=== tree replicas ==="
+          find replicas -maxdepth 2 -type f -print | sed 's#^#  #'
+          echo "=== metrics present? ==="
+          find replicas -type f \( -name 'observations.json' -o -name 'metrics_*json' \) -print | sed 's#^#  #'
+
       - name: Aggregate replicas → site/
         run: |
           python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
