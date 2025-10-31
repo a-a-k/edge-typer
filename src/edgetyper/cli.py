@@ -1298,13 +1298,17 @@ def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None
     preds = pd.read_csv(pred_path)
     adj = blocking_adjacency_from_edges(edges, preds, assume_all_blocking=assume_all_blocking)
 
-    # replicas
+    # replicas (optional)
     replicas: Dict[str, int] = {}
     if replicas_path:
-        r = pd.read_csv(replicas_path)
-        key = "service" if "service" in r.columns else ("target" if "target" in r.columns else None)
-        if key and "replicas" in r.columns:
-            replicas = {str(row[key]): int(row["replicas"]) for _, row in r.iterrows()}
+        rp = Path(replicas_path)
+        if rp.exists():
+            r = pd.read_csv(rp)
+            key = "service" if "service" in r.columns else ("target" if "target" in r.columns else None)
+            if key and "replicas" in r.columns:
+                replicas = {str(row[key]): int(row["replicas"]) for _, row in r.iterrows()}
+        else:
+            click.echo(f"[resilience] replicas file not found: {rp} — defaulting to 1 per service", err=True)
 
     # entrypoints
     if eps_path:

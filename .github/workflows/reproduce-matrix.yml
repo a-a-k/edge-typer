@@ -224,7 +224,6 @@ jobs:
           edgetyper resilience \
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
-            --replicas out/replicas_summary.csv \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_typed.csv"
