@@ -222,20 +222,22 @@ jobs:
       - name: Monte‑Carlo availability (typed)
         run: |
           edgetyper resilience \
-            --edges out/edges.parquet \
-            --pred  out/preds.csv \
+            --edges "${RUN_DIR}/edges.parquet" \
+            --pred  "${RUN_DIR}/pred_ours.csv" \
             --replicas out/replicas_summary.csv \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
-            --out out/availability_typed.csv
+            --out "${RUN_DIR}/availability_typed.csv"
 
       - name: Monte‑Carlo availability (all‑blocking)
         run: |
           edgetyper resilience \
-            --edges out/edges.parquet --pred out/preds.csv \
-            --assume-all-blocking --replicas out/replicas_summary.csv \
-            --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 --samples 900000 \
-            --out out/availability_block.csv
+            --edges "${RUN_DIR}/edges.parquet" \
+            --pred  "${RUN_DIR}/pred_ours.csv" \
+            --assume-all-blocking \
+            --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
+            --samples 900000 \
+            --out "${RUN_DIR}/availability_block.csv"
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4

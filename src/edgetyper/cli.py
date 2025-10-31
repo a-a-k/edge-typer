@@ -1280,7 +1280,7 @@ def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
 @main.command("resilience")
 @click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
 @click.option("--pred",  "pred_path",  type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
-@click.option("--replicas", "replicas_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+@click.option("--replicas", "replicas_path", type=click.Path(exists=False, dir_okay=False, path_type=Path), required=False,
               help="CSV with columns: service, replicas (defaults to 1 if missing).")
 @click.option("--entrypoints", "eps_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
               help="Optional text/CSV with entrypoint service names (one per line or column 'entrypoint').")
