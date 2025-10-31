@@ -15,6 +15,9 @@ from edgetyper.features.semconv import features_semconv
 from edgetyper.features.timing import features_timing
 from edgetyper.classify.rules import baseline_semconv, baseline_timing, rule_labels_from_features
 from edgetyper.classify.model import label_with_fallback
+from edgetyper.resilience import (
+    SimConfig, blocking_adjacency_from_edges, guess_entrypoints, estimate_availability
+)
 
 
 @click.group(context_settings={"help_option_names": ["-h", "--help"]})
@@ -348,11 +351,16 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
               help="Optional live observations JSON to embed.")
 @click.option("--include-brokers", is_flag=True, default=True,
               help="Include broker edges (e.g., kafka) in coverage.")
+@click.option("--availability-typed", "availability_typed_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional availability CSV from `edgetyper resilience` on the typed graph.")
+@click.option("--availability-block", "availability_block_csv", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional availability CSV from `edgetyper resilience --assume-all-blocking`.")
 def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_path: Path | None,
                edges_path: Path | None, features_path: Path | None, gt_path: Path | None, coverage_top: int,
                prov_path: Path | None, assets_dir: Path | None, count_mode: str,
                plan_csv: Path | None, plan_blocking_csv: Path | None,
-               live_json: Path | None, include_brokers: bool) -> None:
+               live_json: Path | None, include_brokers: bool,
+               availability_typed_csv: Path | None, availability_block_csv: Path | None) -> None:
     import re, shutil
 
     outdir.mkdir(parents=True, exist_ok=True)
@@ -674,6 +682,18 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
         dl.append("<li><a href='data/plan_all_blocking.csv' download>plan_all_blocking.csv</a></li>")
     if (assets / "resilience_compare.csv").exists():
         dl.append("<li><a href='data/resilience_compare.csv' download>resilience_compare.csv</a></li>")
+    if availability_typed_csv:
+        try:
+            shutil.copyfile(availability_typed_csv, assets / "availability_typed.csv")
+            dl.append("<li><a href='data/availability_typed.csv'>Availability (typed)</a></li>")
+        except Exception:
+            pass
+    if availability_block_csv:
+        try:
+            shutil.copyfile(availability_block_csv, assets / "availability_block.csv")
+            dl.append("<li><a href='data/availability_block.csv'>Availability (all‑blocking)</a></li>")
+        except Exception:
+            pass
     if debug_link_html: dl.append(debug_link_html)
     dl.append("</ul>")
     html.extend(dl)
@@ -1255,6 +1275,53 @@ def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(result, indent=2))
     click.echo(f"[observe] wrote {out_path}")
+
+# ---------------- resilience (Monte‑Carlo availability) ----------------
+@main.command("resilience")
+@click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--pred",  "pred_path",  type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
+@click.option("--replicas", "replicas_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="CSV with columns: service, replicas (defaults to 1 if missing).")
+@click.option("--entrypoints", "eps_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False,
+              help="Optional text/CSV with entrypoint service names (one per line or column 'entrypoint').")
+@click.option("--p-fail", "p_fail", multiple=True, type=float, default=[0.1,0.3,0.5,0.7,0.9], show_default=True)
+@click.option("--samples", type=int, default=900000, show_default=True)
+@click.option("--seed", type=int, default=0, show_default=True)
+@click.option("--assume-all-blocking", is_flag=True, default=False, show_default=True,
+              help="Treat every edge as blocking (ignore predicted types).")
+@click.option("--out", "out_csv", type=click.Path(dir_okay=False, path_type=Path), required=True)
+def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None,
+                   eps_path: Path | None, p_fail: tuple[float, ...],
+                   samples: int, seed: int, assume_all_blocking: bool, out_csv: Path) -> None:
+    """Monte‑Carlo availability estimator (Algorithm 1)."""
+    edges = pd.read_parquet(edges_path)
+    preds = pd.read_csv(pred_path)
+    adj = blocking_adjacency_from_edges(edges, preds, assume_all_blocking=assume_all_blocking)
+
+    # replicas
+    replicas: Dict[str, int] = {}
+    if replicas_path:
+        r = pd.read_csv(replicas_path)
+        key = "service" if "service" in r.columns else ("target" if "target" in r.columns else None)
+        if key and "replicas" in r.columns:
+            replicas = {str(row[key]): int(row["replicas"]) for _, row in r.iterrows()}
+
+    # entrypoints
+    if eps_path:
+        try:
+            eps_df = pd.read_csv(eps_path)
+            col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
+            entrypoints = [str(x) for x in eps_df[col].tolist()]
+        except Exception:
+            entrypoints = [ln.strip() for ln in Path(eps_path).read_text().splitlines() if ln.strip()]
+    else:
+        entrypoints = guess_entrypoints(adj)
+
+    cfg = SimConfig(p_fail=list(p_fail), samples=int(samples), seed=int(seed))
+    out = estimate_availability(adj, replicas, entrypoints, cfg)
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_csv, index=False)
+    click.echo(f"[resilience] wrote {len(out)} rows → {out_csv}")
 
 
 # --------------------------------

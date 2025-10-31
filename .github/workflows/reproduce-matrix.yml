@@ -219,6 +219,24 @@ jobs:
             '{target: $target, soak_seconds: $soak, traces_size_mb: $size}' \
             > "${RUN_DIR}/provenance.json"
 
+      - name: Monte‑Carlo availability (typed)
+        run: |
+          edgetyper resilience \
+            --edges out/edges.parquet \
+            --pred  out/preds.csv \
+            --replicas out/replicas_summary.csv \
+            --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
+            --samples 900000 \
+            --out out/availability_typed.csv
+
+      - name: Monte‑Carlo availability (all‑blocking)
+        run: |
+          edgetyper resilience \
+            --edges out/edges.parquet --pred out/preds.csv \
+            --assume-all-blocking --replicas out/replicas_summary.csv \
+            --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 --samples 900000 \
+            --out out/availability_block.csv
+
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
         with:
@@ -229,6 +247,12 @@ jobs:
             ${{ env.RUN_DIR }}/plan_all_blocking.csv
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
+
+      - name: Build report site
+        run: edgetyper report --metrics out/metrics --out out/site \
+         --plan out/typed_plan.csv --plan-blocking out/block_plan.csv \
+         --availability-typed out/availability_typed.csv \
+         --availability-block out/availability_block.csv
 
   aggregate:
     runs-on: ubuntu-latest
