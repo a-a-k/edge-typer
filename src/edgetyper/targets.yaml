@@ -1,0 +1,13 @@
+# Request-name → entrypoint mapping used by `edgetyper availability-live`.
+# Rules are evaluated top-to-bottom; the first match wins.
+# Adapt these patterns to your workload if needed.
+entrypoints:
+  home-timeline:
+    - name_regex: "(?i)home[-_/ ]?timeline"
+    - name_regex: "(?i)GET\\s+/(api/)?home[-_/]timeline"
+  user-timeline:
+    - name_regex: "(?i)user[-_/ ]?timeline"
+    - name_regex: "(?i)GET\\s+/(api/)?user[-_/]timeline"
+  compose-post:
+    - name_regex: "(?i)compose[-_/ ]?post"
+    - name_regex: "(?i)POST\\s+/(api/)?compose"

@@ -238,6 +238,32 @@ jobs:
             --samples 900000 \
             --out "${RUN_DIR}/availability_block.csv"
 
+      - name: Build live availability from Locust CSV (optional)
+        shell: bash
+        run: |
+          # Expect Locust CSV: ${RUN_DIR}/locust_stats.csv and ${RUN_DIR}/locust_failures.csv
+          if [[ -f "${RUN_DIR}/locust_stats.csv" ]]; then
+            echo "[live] Locust CSV detected under ${RUN_DIR}"
+            # Derive entrypoints from the model so keys match on join()
+            python - <<'PY'
+            import os, pandas as pd
+            run = os.environ["RUN_DIR"]
+            df  = pd.read_csv(f"{run}/availability_typed.csv")
+            eps = pd.DataFrame({"entrypoint": sorted(df["entrypoint"].dropna().unique())})
+            eps.to_csv(f"{run}/entrypoints.csv", index=False)
+            PY
+            # p_fail for this replica; default to 0.5 if not provided by the matrix
+            PF="${P_FAIL:-0.5}"
+            edgetyper availability-live \
+              --locust-prefix "${RUN_DIR}/locust" \
+              --targets "src/edgetyper/targets.yaml" \
+              --entrypoints "${RUN_DIR}/entrypoints.csv" \
+              --p-fail "${PF}" \
+              --out "${RUN_DIR}/live_availability.csv" --no-append
+          else
+            echo "[live] No ${RUN_DIR}/locust_stats.csv — skipping live availability."
+          fi
+
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
         with:
