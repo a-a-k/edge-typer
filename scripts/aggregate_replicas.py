@@ -359,6 +359,10 @@ def main() -> None:
             "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
         }
 
+    # Ensure 'agg' exists even if an earlier step failed before its construction.
+    # This prevents UnboundLocalError when writing *_ci95 fields.
+    if 'agg' not in locals():
+        agg = {"n_replicas": int(len(df)) if 'df' in locals() else 0}
     for key, vec in [
         ("spearman_typed", spearman_typed_vals),
         ("spearman_block", spearman_block_vals),
