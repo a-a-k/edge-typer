@@ -246,6 +246,8 @@ jobs:
             ${{ env.RUN_DIR }}/metrics_*.json
             ${{ env.RUN_DIR }}/plan_physical.csv
             ${{ env.RUN_DIR }}/plan_all_blocking.csv
+            ${{ env.RUN_DIR }}/availability_typed.csv
+            ${{ env.RUN_DIR }}/availability_block.csv
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
 

@@ -199,6 +199,23 @@ def win_rate(pairs: Iterable[tuple[float | None, float | None]]) -> float | None
     return wins / total
 
 
+def load_availability(rep_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Return (typed_df, block_df) with columns [entrypoint, p_fail, R_model] or empty frames."""
+    def _load(name: str) -> pd.DataFrame:
+        path = rep_dir / name
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            return pd.DataFrame()
+        need = {"entrypoint", "p_fail", "R_model"}
+        if not need.issubset(set(df.columns)):
+            return pd.DataFrame()
+        return df.loc[:, ["entrypoint", "p_fail", "R_model"]].copy()
+    return _load("availability_typed.csv"), _load("availability_block.csv")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--replicas-dir", required=True, type=Path)
@@ -220,6 +237,8 @@ def main() -> None:
     p3_block_vals: list[float] = []
     p5_typed_vals: list[float] = []
     p5_block_vals: list[float] = []
+    avail_typed_frames: list[pd.DataFrame] = []
+    avail_block_frames: list[pd.DataFrame] = []
 
     replicas_dir: Path = args.replicas_dir
     for rep_dir in sorted(replicas_dir.glob("replicate-*")):
@@ -228,6 +247,11 @@ def main() -> None:
         row.update(summary_from_metrics(metrics))
 
         typed_scores, block_scores = load_plans(rep_dir)
+        av_t, av_b = load_availability(rep_dir)
+        if not av_t.empty:
+            avail_typed_frames.append(av_t.assign(replica=rep_dir.name))
+        if not av_b.empty:
+            avail_block_frames.append(av_b.assign(replica=rep_dir.name))
         live = load_live(rep_dir)
 
         pooled_impacts: dict[str, float] = {}
@@ -295,21 +319,45 @@ def main() -> None:
     df = pd.DataFrame(rows)
     df.to_csv(data_dir / "replicas_summary.csv", index=False)
 
-    agg: dict[str, Any] = {
-        "n_replicas": int(len(df)),
-        "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_") and not df[c].dropna().empty},
-        "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_") and not df[c].dropna().empty},
-        "spearman_mean_typed": float(pd.Series(spearman_typed_vals).mean()) if spearman_typed_vals else None,
-        "spearman_mean_block": float(pd.Series(spearman_block_vals).mean()) if spearman_block_vals else None,
-        "kendall_mean_typed": float(pd.Series(kendall_typed_vals).mean()) if kendall_typed_vals else None,
-        "kendall_mean_block": float(pd.Series(kendall_block_vals).mean()) if kendall_block_vals else None,
-        "spearman_winrate": win_rate(spearman_pairs),
-        "kendall_winrate": win_rate(kendall_pairs),
-        "p_at_3_mean_typed": float(pd.Series(p3_typed_vals).mean()) if p3_typed_vals else None,
-        "p_at_3_mean_block": float(pd.Series(p3_block_vals).mean()) if p3_block_vals else None,
-        "p_at_5_mean_typed": float(pd.Series(p5_typed_vals).mean()) if p5_typed_vals else None,
-        "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
-    }
+    # Pooled availability (optional)
+    avail_table_html = ""
+    try:
+        if avail_typed_frames and avail_block_frames:
+            av_t_all = pd.concat(avail_typed_frames, ignore_index=True)
+            av_b_all = pd.concat(avail_block_frames, ignore_index=True)
+            t_mean = (av_t_all.groupby("p_fail")["R_model"].mean().reset_index(name="R_model_typed"))
+            b_mean = (av_b_all.groupby("p_fail")["R_model"].mean().reset_index(name="R_model_block"))
+            mix = t_mean.merge(b_mean, on="p_fail", how="outer").sort_values("p_fail")
+            (data_dir / "availability_typed_pooled.csv").write_text(t_mean.to_csv(index=False))
+            (data_dir / "availability_block_pooled.csv").write_text(b_mean.to_csv(index=False))
+            rows_av = "".join(
+                f"<tr><td>{float(r.p_fail):.1f}</td>"
+                f"<td>{float(getattr(r,'R_model_typed',0.0)):.3f}</td>"
+                f"<td>{float(getattr(r,'R_model_block',0.0)):.3f}</td></tr>"
+                for r in mix.itertuples(index=False)
+            )
+            avail_table_html = (
+                "<h2>Monte-Carlo availability (pooled)</h2>"
+                "<table><thead><tr><th>p_fail</th><th>Typed</th><th>All-blocking</th></tr></thead>"
+                f"<tbody>{rows_av}</tbody></table>"
+            )
+    except Exception:
+
+        agg: dict[str, Any] = {
+            "n_replicas": int(len(df)),
+            "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_") and not df[c].dropna().empty},
+            "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_") and not df[c].dropna().empty},
+            "spearman_mean_typed": float(pd.Series(spearman_typed_vals).mean()) if spearman_typed_vals else None,
+            "spearman_mean_block": float(pd.Series(spearman_block_vals).mean()) if spearman_block_vals else None,
+            "kendall_mean_typed": float(pd.Series(kendall_typed_vals).mean()) if kendall_typed_vals else None,
+            "kendall_mean_block": float(pd.Series(kendall_block_vals).mean()) if kendall_block_vals else None,
+            "spearman_winrate": win_rate(spearman_pairs),
+            "kendall_winrate": win_rate(kendall_pairs),
+            "p_at_3_mean_typed": float(pd.Series(p3_typed_vals).mean()) if p3_typed_vals else None,
+            "p_at_3_mean_block": float(pd.Series(p3_block_vals).mean()) if p3_block_vals else None,
+            "p_at_5_mean_typed": float(pd.Series(p5_typed_vals).mean()) if p5_typed_vals else None,
+            "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
+        }
 
     for key, vec in [
         ("spearman_typed", spearman_typed_vals),
@@ -357,6 +405,7 @@ def main() -> None:
 </table>
 <p>95% CIs: P@3_typed={agg.get('p_at_3_typed_ci95')}, P@3_block={agg.get('p_at_3_block_ci95')}<br>
 P@5_typed={agg.get('p_at_5_typed_ci95')}, P@5_block={agg.get('p_at_5_block_ci95')}</p>
+{avail_table_html}
 <h2>Downloads</h2>
 <ul>
   <li><a href="data/aggregate_summary.json" download>aggregate_summary.json</a></li>
