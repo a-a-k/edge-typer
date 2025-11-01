@@ -381,6 +381,7 @@ def main() -> None:
     def fmt(val: float | None) -> str:
         return "n/a" if val is None else f"{val:.3f}"
 
+    agg.setdefault("macroF1_means", {})
     html = f"""<!doctype html><meta charset="utf-8">
 <title>EdgeTyper — Aggregate (256×, soak 1800s)</title>
 <style>body{{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}}table{{border-collapse:collapse}}td,th{{border:1px solid #ddd;padding:6px 10px}}</style>
