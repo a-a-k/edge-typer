@@ -367,6 +367,25 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     assets = assets_dir or (outdir / "data")
     assets.mkdir(parents=True, exist_ok=True)
 
+    # --- Auto-detect optional inputs in metrics_dir when flags are omitted ---
+    # This makes the workflow call resilient: we can invoke 'report' with only --metrics/--out.
+    if plan_csv is None:
+        _c = metrics_dir / "plan_physical.csv"
+        if _c.exists():
+            plan_csv = _c
+    if plan_blocking_csv is None:
+        _c = metrics_dir / "plan_all_blocking.csv"
+        if _c.exists():
+            plan_blocking_csv = _c
+    if availability_typed_csv is None:
+        _c = metrics_dir / "availability_typed.csv"
+        if _c.exists():
+            availability_typed_csv = _c
+    if availability_block_csv is None:
+        _c = metrics_dir / "availability_block.csv"
+        if _c.exists():
+            availability_block_csv = _c
+
     # ---------- load metrics ----------
     items = []
     for p in sorted(metrics_dir.glob("**/metrics_*.json")):
