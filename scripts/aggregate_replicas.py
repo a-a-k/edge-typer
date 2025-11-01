@@ -216,6 +216,24 @@ def load_availability(rep_dir: Path) -> tuple[pd.DataFrame, pd.DataFrame]:
         return df.loc[:, ["entrypoint", "p_fail", "R_model"]].copy()
     return _load("availability_typed.csv"), _load("availability_block.csv")
 
+def load_live_availability(rep_dir: Path) -> pd.DataFrame:
+    """Return live_df with columns [entrypoint, p_fail, R_live] or empty frame."""
+    path = rep_dir / "live_availability.csv"
+    if not path.exists():
+        return pd.DataFrame()
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return pd.DataFrame()
+    need = {"entrypoint", "p_fail", "R_live"}
+    if not need.issubset(set(df.columns)):
+        return pd.DataFrame()
+    out = df.loc[:, ["entrypoint", "p_fail", "R_live"]].copy()
+    out["entrypoint"] = out["entrypoint"].astype(str)
+    out["p_fail"] = pd.to_numeric(out["p_fail"], errors="coerce")
+    out["R_live"] = pd.to_numeric(out["R_live"], errors="coerce")
+    return out.dropna()
+
 
 def main() -> None:
     ap = argparse.ArgumentParser()
@@ -240,6 +258,7 @@ def main() -> None:
     p5_block_vals: list[float] = []
     avail_typed_frames: list[pd.DataFrame] = []
     avail_block_frames: list[pd.DataFrame] = []
+    avail_live_frames: list[pd.DataFrame] = []
 
     replicas_dir: Path = args.replicas_dir
     for rep_dir in sorted(replicas_dir.glob("replicate-*")):
@@ -253,6 +272,10 @@ def main() -> None:
             avail_typed_frames.append(av_t.assign(replica=rep_dir.name))
         if not av_b.empty:
             avail_block_frames.append(av_b.assign(replica=rep_dir.name))
+        # optional live availability for the same entrypoint×p_fail grid
+        av_l = load_live_availability(rep_dir)
+        if not av_l.empty:
+            avail_live_frames.append(av_l.assign(replica=rep_dir.name))
         live = load_live(rep_dir)
 
         pooled_impacts: dict[str, float] = {}
@@ -360,6 +383,59 @@ def main() -> None:
             "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
         }
 
+    # ---- Model (typed/block) vs live ----
+    downloads_extra = ""
+    live_join_html = ""
+    try:
+        if avail_live_frames and avail_typed_frames and avail_block_frames:
+            av_t_all = pd.concat(avail_typed_frames, ignore_index=True).rename(columns={"R_model": "R_model_typed"})
+            av_b_all = pd.concat(avail_block_frames, ignore_index=True).rename(columns={"R_model": "R_model_block"})
+            av_l_all = pd.concat(avail_live_frames,  ignore_index=True)
+            key = ["replica", "entrypoint", "p_fail"]
+            J = (av_l_all.merge(av_t_all, on=key, how="inner")
+                           .merge(av_b_all, on=key, how="inner"))
+            if not J.empty:
+                J["err_typed"] = (J["R_model_typed"] - J["R_live"]).abs()
+                J["err_block"] = (J["R_model_block"] - J["R_live"]).abs()
+                (data_dir / "availability_join_pooled.csv").write_text(J.to_csv(index=False))
+
+                byp = (J.groupby("p_fail", as_index=False)
+                         .agg(R_live=("R_live","mean"),
+                              R_model_typed=("R_model_typed","mean"),
+                              R_model_block=("R_model_block","mean"),
+                              MAE_typed=("err_typed","mean"),
+                              MAE_block=("err_block","mean")))
+                byp["delta_mae"] = byp["MAE_block"] - byp["MAE_typed"]
+                (data_dir / "availability_errors_by_p.csv").write_text(byp.to_csv(index=False))
+
+                overall_mae_t = float(J["err_typed"].mean())
+                overall_mae_b = float(J["err_block"].mean())
+                winrate = float(((J["err_typed"] < J["err_block"]).astype(float)
+                                 + 0.5*(J["err_typed"] == J["err_block"]).astype(float)).mean())
+                pd.DataFrame([{"MAE_typed": overall_mae_t,
+                               "MAE_block": overall_mae_b,
+                               "win_rate_typed": winrate}]).to_csv(data_dir / "availability_errors_overall.csv", index=False)
+
+                rows = "".join(
+                    f"<tr><td>{float(r.p_fail):.1f}</td>"
+                    f"<td>{float(r.R_live):.3f}</td>"
+                    f"<td>{float(r.R_model_typed):.3f}</td>"
+                    f"<td>{float(r.R_model_block):.3f}</td>"
+                    f"<td>{float(r.MAE_typed):.3f}</td>"
+                    f"<td>{float(r.MAE_block):.3f}</td>"
+                    f"<td>{float(r.delta_mae):.3f}</td></tr>" for r in byp.itertuples(index=False))
+                live_join_html = ("<h2>Availability: model vs live (pooled)</h2>"
+                                  "<table><thead><tr><th>p_fail</th><th>Live</th><th>Typed</th>"
+                                  "<th>All-blocking</th><th>MAE typed</th><th>MAE all-block</th><th>ΔMAE</th>"
+                                  "</tr></thead><tbody>" + rows + "</tbody></table>")
+                downloads_extra = (
+                    '<li><a href="data/availability_join_pooled.csv" download>availability_join_pooled.csv</a></li>'
+                    '<li><a href="data/availability_errors_by_p.csv" download>availability_errors_by_p.csv</a></li>'
+                    '<li><a href="data/availability_errors_overall.csv" download>availability_errors_overall.csv</a></li>'
+                )
+    except Exception:
+        pass
+
     # Ensure 'agg' exists even if an earlier step failed before its construction.
     # This prevents UnboundLocalError when writing *_ci95 fields.
     if 'agg' not in locals():
@@ -393,6 +469,7 @@ def main() -> None:
             "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>"
             f"<h1>EdgeTyper — Aggregate (n={agg['n_replicas']}, soak=1800s)</h1>"
             f"{avail_table_html}"
+            f"{live_join_html}"
             "<h2>Downloads</h2><ul>"
             "<li><a href='data/aggregate_summary.json' download>aggregate_summary.json</a></li>"
             "<li><a href='data/replicas_summary.csv' download>replicas_summary.csv</a></li>"
