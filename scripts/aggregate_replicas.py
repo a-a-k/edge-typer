@@ -473,6 +473,7 @@ def main() -> None:
             "<h2>Downloads</h2><ul>"
             "<li><a href='data/aggregate_summary.json' download>aggregate_summary.json</a></li>"
             "<li><a href='data/replicas_summary.csv' download>replicas_summary.csv</a></li>"
+            f"{downloads_extra}"
             "</ul>"
         )
         (outdir / "index.html").write_text(html_min)
@@ -507,10 +508,12 @@ def main() -> None:
 <p>95% CIs: P@3_typed={agg.get('p_at_3_typed_ci95')}, P@3_block={agg.get('p_at_3_block_ci95')}<br>
 P@5_typed={agg.get('p_at_5_typed_ci95')}, P@5_block={agg.get('p_at_5_block_ci95')}</p>
 {avail_table_html}
+{live_join_html}
 <h2>Downloads</h2>
 <ul>
   <li><a href="data/aggregate_summary.json" download>aggregate_summary.json</a></li>
   <li><a href="data/replicas_summary.csv" download>replicas_summary.csv</a></li>
+  {downloads_extra}
 </ul>
 """
 

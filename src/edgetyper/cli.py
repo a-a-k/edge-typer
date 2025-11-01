@@ -1073,6 +1073,71 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     click.echo(f"[report] wrote {outdir / 'index.html'}")
 
 
+# ---------------- live-from-locust ----------------
+@main.command("live-from-locust")
+@click.option("--stats", "stats_csv",
+              type=click.Path(exists=True, dir_okay=False, path_type=Path),
+              required=True,
+              help="Locust stats CSV (aggregated row or per-endpoint stats).")
+@click.option("--failures", "fail_csv",
+              type=click.Path(exists=False, dir_okay=False, path_type=Path),
+              required=False,
+              help="Optional Locust failures CSV to refine failure count.")
+@click.option("--entrypoint", "entrypoint", type=str, required=True,
+              help="Model entrypoint name (must match 'entrypoint' in availability_*.csv, e.g., 'frontend').")
+@click.option("--p-fail", "p_fail", type=float, required=True,
+              help="Failure fraction label to align with model grid (e.g., 0.3).")
+@click.option("--out", "out_csv",
+              type=click.Path(dir_okay=False, path_type=Path),
+              required=True,
+              help="Output CSV path (usually RUN_DIR/live_availability.csv).")
+def live_from_locust_cmd(stats_csv: Path, fail_csv: Path | None,
+                         entrypoint: str, p_fail: float, out_csv: Path) -> None:
+    """
+    Convert Locust CSVs into the minimal live availability grid consumed by the aggregator.
+    Output schema: entrypoint,p_fail,R_live
+    Robust to different Locust column names: 'Requests'/'Request Count', 'Failures'/'Failure Count'.
+    """
+    import pandas as _pd
+
+    def _col(df: _pd.DataFrame, candidates: list[str]) -> str | None:
+        # case-insensitive resolution
+        lut = {c.lower(): c for c in df.columns}
+        for c in candidates:
+            if c.lower() in lut:
+                return lut[c.lower()]
+        return None
+
+    df = _pd.read_csv(stats_csv)
+    # Prefer 'Aggregated' row if present; otherwise use totals
+    if "Name" in df.columns and (df["Name"].astype(str).str.lower() == "aggregated").any():
+        row = df[df["Name"].astype(str).str.lower() == "aggregated"].iloc[0:1]
+    else:
+        row = df
+
+    req_col  = _col(df, ["Requests", "Request Count", "Total Request Count"])
+    fail_col = _col(df, ["Failures", "Failure Count", "Total Failure Count"])
+    if req_col is None or fail_col is None:
+        raise click.ClickException(f"Cannot find request/failure columns in {stats_csv}.")
+
+    total  = float(row[req_col].astype(float).sum())
+    fails  = float(row[fail_col].astype(float).sum())
+
+    # If failures CSV is present and has 'Count', prefer it
+    if fail_csv and Path(fail_csv).exists():
+        try:
+            fdf = _pd.read_csv(fail_csv)
+            if "Count" in fdf.columns:
+                fails = float(fdf["Count"].astype(float).sum())
+        except Exception:
+            pass
+
+    R = 0.0 if total <= 0 else max(0.0, total - fails) / total
+    out = _pd.DataFrame([{"entrypoint": str(entrypoint), "p_fail": float(p_fail), "R_live": float(R)}])
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    out.to_csv(out_csv, index=False)
+    click.echo(f"[live-from-locust] wrote {out_csv} (R_live={R:.3f}, entrypoint={entrypoint}, p_fail={p_fail})")
+
 # ---------------- debug ----------------
 @main.command("debug")
 @click.option("--features", "features_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
