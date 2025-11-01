@@ -324,8 +324,8 @@ def eval_cmd(pred_path: Path, features_path: Path, gt_path: Path, out_path: Path
 
 # ---------------- report ----------------
 @main.command("report")
-@click.option("--metrics-dir", "metrics_dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
-@click.option("--outdir", "outdir", type=click.Path(file_okay=False, path_type=Path), required=True)
+@click.option("--metrics-dir", "--metrics", "metrics_dir", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--outdir", "--out", "outdir", type=click.Path(file_okay=False, path_type=Path), required=True)
 @click.option("--spans", "spans_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
 @click.option("--events", "events_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
 @click.option("--edges", "edges_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=False)
