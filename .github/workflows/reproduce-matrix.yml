@@ -294,7 +294,7 @@ jobs:
 
       - name: Aggregate replicas → site/
         run: |
-          python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
+          AVAIL_ONLY=1 python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

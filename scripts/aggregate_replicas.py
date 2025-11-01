@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import os
 from pathlib import Path
 from statistics import mean
 from typing import Any, Iterable
@@ -382,6 +383,24 @@ def main() -> None:
         return "n/a" if val is None else f"{val:.3f}"
 
     agg.setdefault("macroF1_means", {})
+
+    # --- availability-only mode: build a minimal page and exit early ---
+    if os.getenv("AVAIL_ONLY", "0") == "1":
+        html_min = (
+            "<!doctype html><meta charset='utf-8'>"
+            "<title>EdgeTyper — Aggregate (availability-only)</title>"
+            "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
+            "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>"
+            f"<h1>EdgeTyper — Aggregate (n={agg['n_replicas']}, soak=1800s)</h1>"
+            f"{avail_table_html}"
+            "<h2>Downloads</h2><ul>"
+            "<li><a href='data/aggregate_summary.json' download>aggregate_summary.json</a></li>"
+            "<li><a href='data/replicas_summary.csv' download>replicas_summary.csv</a></li>"
+            "</ul>"
+        )
+        (outdir / "index.html").write_text(html_min)
+        return
+
     html = f"""<!doctype html><meta charset="utf-8">
 <title>EdgeTyper — Aggregate (256×, soak 1800s)</title>
 <style>body{{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}}table{{border-collapse:collapse}}td,th{{border:1px solid #ddd;padding:6px 10px}}</style>
