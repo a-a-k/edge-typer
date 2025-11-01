@@ -250,10 +250,10 @@ jobs:
             ${{ env.RUN_DIR }}/provenance.json
 
       - name: Build report site
-        run: edgetyper report --metrics "${{ env.RUN_DIR }}" --out site \
-         --plan "${{ env.RUN_DIR }}/plan_physical.csv" --plan-blocking "${{ env.RUN_DIR }}/plan_all_blocking.csv" \
-         --availability-typed "${{ env.RUN_DIR }}/availability_typed.csv" \
-         --availability-block "${{ env.RUN_DIR }}/availability_block.csv"
+        run: python -m edgetyper.cli report --metrics "${{ env.RUN_DIR }}" --out site \
+          --plan "${{ env.RUN_DIR }}/plan_physical.csv" --plan-blocking "${{ env.RUN_DIR }}/plan_all_blocking.csv" \
+          --availability-typed "${{ env.RUN_DIR }}/availability_typed.csv" \
+          --availability-block "${{ env.RUN_DIR }}/availability_block.csv"
 
   aggregate:
     runs-on: ubuntu-latest
