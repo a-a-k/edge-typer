@@ -397,16 +397,16 @@ def main() -> None:
 <h2>Prediction vs live (pooled)</h2>
 <table>
   <tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Win rate (typed &gt; block)</th></tr>
-  <tr><td>Spearman ρ (mean)</td><td>{fmt(agg['spearman_mean_typed'])}</td><td>{fmt(agg['spearman_mean_block'])}</td><td>{fmt(agg['spearman_winrate'])}</td></tr>
-  <tr><td>Kendall τ (mean)</td><td>{fmt(agg['kendall_mean_typed'])}</td><td>{fmt(agg['kendall_mean_block'])}</td><td>{fmt(agg['kendall_winrate'])}</td></tr>
+  <tr><td>Spearman ρ (mean)</td><td>{fmt(agg.get('spearman_mean_typed'))}</td><td>{fmt(agg.get('spearman_mean_block'))}</td><td>{fmt(agg.get('spearman_winrate'))}</td></tr>
+  <tr><td>Kendall τ (mean)</td><td>{fmt(agg.get('kendall_mean_typed'))}</td><td>{fmt(agg.get('kendall_mean_block'))}</td><td>{fmt(agg.get('kendall_winrate'))}</td></tr>
 </table>
 <p>95% CIs: ρ_typed={agg.get('spearman_typed_ci95')}, ρ_block={agg.get('spearman_block_ci95')}<br>
 τ_typed={agg.get('kendall_typed_ci95')}, τ_block={agg.get('kendall_block_ci95')}</p>
 <h2>Top-k hit rate</h2>
 <table>
   <tr><th></th><th>Typed</th><th>All-blocking</th></tr>
-  <tr><td>P@3 (mean)</td><td>{fmt(agg['p_at_3_mean_typed'])}</td><td>{fmt(agg['p_at_3_mean_block'])}</td></tr>
-  <tr><td>P@5 (mean)</td><td>{fmt(agg['p_at_5_mean_typed'])}</td><td>{fmt(agg['p_at_5_mean_block'])}</td></tr>
+  <tr><td>P@3 (mean)</td><td>{fmt(agg.get('p_at_3_mean_typed'))}</td><td>{fmt(agg.get('p_at_3_mean_block'))}</td></tr>
+  <tr><td>P@5 (mean)</td><td>{fmt(agg.get('p_at_5_mean_typed'))}</td><td>{fmt(agg.get('p_at_5_mean_block'))}</td></tr>
 </table>
 <p>95% CIs: P@3_typed={agg.get('p_at_3_typed_ci95')}, P@3_block={agg.get('p_at_3_block_ci95')}<br>
 P@5_typed={agg.get('p_at_5_typed_ci95')}, P@5_block={agg.get('p_at_5_block_ci95')}</p>
