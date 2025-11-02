@@ -70,14 +70,14 @@ def blocking_adjacency_from_edges(edges: pd.DataFrame,
                                   assume_all_blocking: bool = False) -> Dict[str, Set[str]]:
     """
     edges: columns include [src_service, dst_service, ...]
-    preds: columns include [src_service, dst_service, pred_label in {'async','sync'}]
+    preds: columns include [src_service, dst_service, pred_label in {'async','sync','uncertain'}]
     """
     g = edges.merge(preds[["src_service", "dst_service", "pred_label"]],
                     on=["src_service", "dst_service"], how="left")
     if assume_all_blocking:
         g["etype"] = "BLOCKING"
     else:
-        g["etype"] = g["pred_label"].str.lower().map({"async": "ASYNC", "sync": "BLOCKING"})
+        g["etype"] = g["pred_label"].str.lower().map({"async": "ASYNC", "sync": "BLOCKING", "uncertain": "BLOCKING"})
     g = g.dropna(subset=["etype"]).copy()
 
     adj: Dict[str, Set[str]] = {}

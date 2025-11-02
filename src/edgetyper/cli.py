@@ -1218,7 +1218,7 @@ def plan_cmd(
     if assume_all_blocking:
         g["etype"] = "BLOCKING"
     else:
-        g["etype"] = g["pred_label"].str.lower().map({"async": "ASYNC", "sync": "BLOCKING"})
+        g["etype"] = g["pred_label"].str.lower().map({"async": "ASYNC", "sync": "BLOCKING", "uncertain": "BLOCKING"})
     g = g.dropna(subset=["etype"]).copy()
 
     wcol = {"events":"n_events","rpc":"n_rpc","messaging":"n_messaging"}[weight.lower()]

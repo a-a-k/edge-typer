@@ -100,12 +100,31 @@ jobs:
           YAML
         
           # 3) Compose override to mount a host directory for /data so the JSON lands in $RUN_DIR/collector
-          cat > "${DEMO_DIR}/docker-compose.override.yml" <<'YAML'
+          # Determine the load generator service key (loadgenerator vs load-generator)
+          LG=$(awk '/^[[:space:]]{2}loadgenerator:|^[[:space:]]{2}load-generator:/{gsub(":",""); gsub(" ",""); print $1; exit}' "$COMPOSE")
+          LG=${LG:-loadgenerator}
+          cat > "${DEMO_DIR}/docker-compose.override.yml" <<YAML
           services:
             otel-collector:
               volumes:
                 - "${RUN_DIR}/collector:/data:rw"
+            loadgenerator:
+              environment:
+                - LOCUST_OPTS=--csv /data/locust --csv-full-history
+              volumes:
+                - "${RUN_DIR}:/data:rw"
+            load-generator:
+              environment:
+                - LOCUST_OPTS=--csv /data/locust --csv-full-history
+              volumes:
+                - "${RUN_DIR}:/data:rw"
+            ${LG}:
+              environment:
+                - LOCUST_OPTS=--csv /data/locust --csv-full-history
+              volumes:
+                - "${RUN_DIR}:/data:rw"
           YAML
+
 
         
           # 4) Bring the demo up, soak, then tear it down
@@ -152,6 +171,9 @@ jobs:
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+          # Freeze entrypoints for model/live parity
+          python scripts/targets_to_entrypoints.py --targets src/edgetyper/targets.yaml --out "${RUN_DIR}/entrypoints.csv"
+          echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
           
           # Robustness masks
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_drop.parquet" --mask-semconv
@@ -224,6 +246,7 @@ jobs:
           edgetyper resilience \
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
+            --entrypoints "${RUN_DIR}/entrypoints.csv" \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_typed.csv"
@@ -234,6 +257,7 @@ jobs:
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
             --assume-all-blocking \
+            --entrypoints "${RUN_DIR}/entrypoints.csv" \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_block.csv"
@@ -242,11 +266,23 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          STATS="${RUN_DIR}/locust_stats.csv"
-          FAILS="${RUN_DIR}/locust_failures.csv"
-          TYPED="${RUN_DIR}/availability_typed.csv"
-          OUT="${RUN_DIR}/live_availability.csv"
-          python scripts/build_live_availability.py --stats "$STATS" --failures "$FAILS" --typed "$TYPED" --replica "${REPL_ID}" --out "$OUT"
+          # Locust CSVs are emitted by the load generator into $RUN_DIR via compose override.
+          # Expect ${RUN_DIR}/locust_stats.csv (and optionally locust_failures.csv).
+          if [[ -s "${RUN_DIR}/locust_stats.csv" ]]; then
+            echo "[live] Found locust_stats.csv; building live_availability.csv"
+            TYPED="${RUN_DIR}/availability_typed.csv"
+            : > "${RUN_DIR}/live_availability.csv"
+            PF_LIST=$(awk -F, 'NR>1{print $2}' "$TYPED" | sort -u)
+            for p in $PF_LIST; do
+              edgetyper availability-live \
+                --locust-prefix "${RUN_DIR}/locust" \
+                --targets src/edgetyper/targets.yaml \
+                --p-fail "$p" \
+                --out "${RUN_DIR}/live_availability.csv" --append || true
+            done
+          else
+            echo "[live] No Locust CSV present; skipping."
+          fi
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
