@@ -285,20 +285,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Locust CSVs are emitted by the load generator into $RUN_DIR via compose override.
-          # Expect ${RUN_DIR}/locust_stats.csv (and optionally locust_failures.csv).
-          if [[ -s "${RUN_DIR}/locust_stats.csv" ]]; then
-            echo "[live] Found locust_stats.csv; building live_availability.csv"
+          echo "[live] Listing potential Locust CSVs under ${RUN_DIR}:" && ls -lah ${RUN_DIR} || true
+          # Find newest locust *_stats.csv produced by the load generator
+          STATS=$(ls -1t "${RUN_DIR}"/locust*_stats.csv 2>/dev/null | head -n1 || true)
+          if [[ -n "${STATS}" && -s "${STATS}" ]]; then
+            FAILS="${STATS/_stats.csv/_failures.csv}"
+            echo "[live] Using stats=${STATS} failures=${FAILS}"
             python scripts/build_live_availability.py \
-              --stats    "${RUN_DIR}/locust_stats.csv" \
-              --failures "${RUN_DIR}/locust_failures.csv" \
+              --stats    "${STATS}" \
+              --failures "${FAILS}" \
               --typed    "${RUN_DIR}/availability_typed.csv" \
               --replica  "replicate-${REPL_ID}" \
+              --targets  src/edgetyper/targets.yaml \
+              --entrypoints "${RUN_DIR}/entrypoints.csv" \
               --out      "${RUN_DIR}/live_availability.csv" || true
             ls -l "${RUN_DIR}" || true
             echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
           else
-            echo "[live] No Locust CSV present; skipping."
+            echo "[live] No Locust *_stats.csv present; skipping."
           fi
 
       - name: Upload replica artifact
@@ -314,6 +318,8 @@ jobs:
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
             ${{ env.RUN_DIR }}/live_availability.csv
+            ${{ env.RUN_DIR }}/locust*_stats*.csv
+            ${{ env.RUN_DIR }}/locust*_failures*.csv
 
       - name: Build report site
         run: python -m edgetyper.cli report --metrics "${{ env.RUN_DIR }}" --out site
