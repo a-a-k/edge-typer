@@ -131,7 +131,7 @@ jobs:
                 /bin/sh -lc 'if ! echo "${LOCUST_OPTS:-}" | grep -q -- "--csv"; then export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
               volumes:
                 - "${RUN_DIR}:/data:rw"
-            ${LG}:
+            load-generator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
@@ -158,6 +158,13 @@ jobs:
           COMPOSE="$DEMO_DIR/docker-compose.yml"
           COMPOSE_OVERRIDE="$DEMO_DIR/docker-compose.override.yml"
           COMPOSE_OPTS="-f $COMPOSE -f $COMPOSE_OVERRIDE"
+          
+          # Validate combined Compose config early to catch YAML/merge mistakes
+          if ! $COMPOSE_CMD $COMPOSE_OPTS config >/dev/null; then
+            echo "::error ::Compose config validation failed (base + override)." >&2
+            echo "Base compose at: $COMPOSE"; echo "Override at: $COMPOSE_OVERRIDE";
+            exit 1
+          fi
           
           $COMPOSE_CMD $COMPOSE_OPTS up --force-recreate --remove-orphans --detach
           echo "Soaking for ${SOAK_SECONDS}s..."
