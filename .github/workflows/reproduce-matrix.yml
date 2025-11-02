@@ -75,18 +75,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUN_DIR/collector"
           DEMO_DIR="${DEMO_DIR:-"$GITHUB_WORKSPACE/vendor/opentelemetry-demo"}"
-          
+
           # Compose shim: prefer 'docker compose', fallback to classic 'docker-compose'
           if docker compose version >/dev/null 2>&1; then
-            COMPOSE="docker compose"
+            COMPOSE_CMD="docker compose"
           elif command -v docker-compose >/dev/null 2>&1; then
-            COMPOSE="docker-compose"
+            COMPOSE_CMD="docker-compose"
           else
             echo "::error ::Neither 'docker compose' nor 'docker-compose' is available" >&2
             exit 1
           fi
-          export COMPOSE
-          echo "Using COMPOSE='${COMPOSE}'"
+          export COMPOSE_CMD
+          echo "Using COMPOSE='${COMPOSE_CMD}'"
 
           # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
           if [[ ! -d vendor/opentelemetry-demo ]]; then
@@ -179,7 +179,20 @@ jobs:
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
           # Freeze entrypoints for model/live parity
-          python scripts/targets_to_entrypoints.py --targets src/edgetyper/targets.yaml --out "${RUN_DIR}/entrypoints.csv"
+          # Prefer helper script; fall back to tiny inline Python if the script is absent.
+          if [[ -f scripts/targets_to_entrypoints.py ]]; then
+            python scripts/targets_to_entrypoints.py \
+              --targets src/edgetyper/targets.yaml \
+              --out "${RUN_DIR}/entrypoints.csv"
+          else
+            python - <<'PY'
+import sys, csv, yaml, pathlib
+cfg=yaml.safe_load(open("src/edgetyper/targets.yaml"))
+eps=list((cfg.get("entrypoints") or {}).keys())
+pathlib.Path(sys.argv[1]).write_text("entrypoint\n" + "\n".join(eps) + "\n")
+PY
+            "${RUN_DIR}/entrypoints.csv"
+          fi
           echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
           
           # Robustness masks
@@ -271,7 +284,6 @@ jobs:
 
       - name: Build live availability from Locust CSV (optional)
         shell: bash
-        env: { COMPOSE: "docker compose" }
         run: |
           set -euo pipefail
           # Locust CSVs are emitted by the load generator into $RUN_DIR via compose override.
@@ -304,6 +316,7 @@ jobs:
             ${{ env.RUN_DIR }}/availability_block.csv
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
+            ${{ env.RUN_DIR }}/live_availability.csv
 
       - name: Build report site
         run: python -m edgetyper.cli report --metrics "${{ env.RUN_DIR }}" --out site
