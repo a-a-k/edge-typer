@@ -117,7 +117,7 @@ jobs:
           # (awk reads the YAML file; do NOT pass the CLI here)
           LG=$(awk '/^[[:space:]]{2}(loadgenerator|load-generator):/{sub(":",""); gsub(" ",""); print $1; exit}' "$COMPOSE")
           LG=${LG:-loadgenerator}
-          cat > "${DEMO_DIR}/docker-compose.override.yml" <<YAML
+          cat > "${DEMO_DIR}/docker-compose.override.yml" <<'YAML'
           services:
             otel-collector:
               volumes:
@@ -128,7 +128,7 @@ jobs:
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
               command: >
-                /bin/sh -lc 'if ! echo "$LOCUST_OPTS" | grep -q -- "--csv"; then export LOCUST_OPTS="$LOCUST_OPTS --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
+                /bin/sh -lc 'if ! echo "${LOCUST_OPTS:-}" | grep -q -- "--csv"; then export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
               volumes:
                 - "${RUN_DIR}:/data:rw"
             ${LG}:
@@ -136,10 +136,13 @@ jobs:
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
               command: >
-                /bin/sh -lc 'if ! echo "$LOCUST_OPTS" | grep -q -- "--csv"; then export LOCUST_OPTS="$LOCUST_OPTS --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
+                /bin/sh -lc 'if ! echo "${LOCUST_OPTS:-}" | grep -q -- "--csv"; then export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
               volumes:
                 - "${RUN_DIR}:/data:rw"
           YAML
+
+          echo "--- docker-compose.override.yml ---"
+          nl -ba "${DEMO_DIR}/docker-compose.override.yml" | sed 's/^/  /'
 
 
         
