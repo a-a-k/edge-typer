@@ -289,16 +289,14 @@ jobs:
           # Expect ${RUN_DIR}/locust_stats.csv (and optionally locust_failures.csv).
           if [[ -s "${RUN_DIR}/locust_stats.csv" ]]; then
             echo "[live] Found locust_stats.csv; building live_availability.csv"
-            TYPED="${RUN_DIR}/availability_typed.csv"
-            : > "${RUN_DIR}/live_availability.csv"
-            PF_LIST=$(awk -F, 'NR>1{print $2}' "$TYPED" | sort -u)
-            for p in $PF_LIST; do
-              edgetyper availability-live \
-                --locust-prefix "${RUN_DIR}/locust" \
-                --targets src/edgetyper/targets.yaml \
-                --p-fail "$p" \
-                --out "${RUN_DIR}/live_availability.csv" --append || true
-            done
+            python scripts/build_live_availability.py \
+              --stats    "${RUN_DIR}/locust_stats.csv" \
+              --failures "${RUN_DIR}/locust_failures.csv" \
+              --typed    "${RUN_DIR}/availability_typed.csv" \
+              --replica  "replicate-${REPL_ID}" \
+              --out      "${RUN_DIR}/live_availability.csv" || true
+            ls -l "${RUN_DIR}" || true
+            echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
           else
             echo "[live] No Locust CSV present; skipping."
           fi

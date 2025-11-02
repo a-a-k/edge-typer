@@ -139,6 +139,8 @@ def main() -> None:
     ap.add_argument("--typed",    required=False, type=Path, help="availability_typed.csv to infer p_fail grid")
     ap.add_argument("--replica",  required=False, type=str,   help="replicate-* name to stamp into 'replica' column")
     ap.add_argument("--p-grid",   required=False, type=str,   help="explicit grid, e.g. '0.1,0.3,0.5,0.7,0.9'")
+    ap.add_argument("--targets",  required=False, type=Path,  help="optional targets.yaml with entrypoint mapping (regex)")
+    ap.add_argument("--entrypoints", required=False, type=Path, help="optional entrypoints.csv to filter")
     ap.add_argument("--out",      required=True,  type=Path,  help="output live_availability.csv")
     args = ap.parse_args()
 
@@ -149,9 +151,62 @@ def main() -> None:
     failures_df = _read_csv(args.failures) if args.failures else None
     failures_map = _compute_failures_by_name(failures_df)
 
-    live_by_ep = _extract_live_by_entrypoint(stats_df, failures_map)
-    if not live_by_ep:
+    live_by_name = _extract_live_by_entrypoint(stats_df, failures_map)
+    if not live_by_name:
         return
+
+    # Map request names to entrypoints; default: everything → 'load-generator'
+    name_to_ep: Dict[str, str] = {}
+    eps_filter: Optional[set[str]] = None
+    if args.entrypoints and args.entrypoints.exists():
+        try:
+            df_eps = pd.read_csv(args.entrypoints)
+            col = "entrypoint" if "entrypoint" in df_eps.columns else df_eps.columns[0]
+            eps_filter = set(str(x) for x in df_eps[col].dropna().tolist())
+        except Exception:
+            pass
+    if args.targets and args.targets.exists():
+        import yaml
+        try:
+            cfg = yaml.safe_load(args.targets.read_text()) or {}
+            rules: list[tuple[str, str]] = []
+            for ep, plist in (cfg.get("entrypoints") or {}).items():
+                for rule in (plist or []):
+                    pat = str(rule.get("name_regex") or rule.get("re") or ".*")
+                    rules.append((str(ep), pat))
+            import re
+            for name in live_by_name.keys():
+                ep_hit: Optional[str] = None
+                for ep, pat in rules:
+                    try:
+                        if re.search(pat, name):
+                            ep_hit = ep; break
+                    except Exception:
+                        try:
+                            if re.search(pat, name, re.I):
+                                ep_hit = ep; break
+                        except Exception:
+                            continue
+                name_to_ep[name] = ep_hit or "load-generator"
+        except Exception:
+            name_to_ep = {name: "load-generator" for name in live_by_name.keys()}
+    else:
+        name_to_ep = {name: "load-generator" for name in live_by_name.keys()}
+
+    # Aggregate by mapped entrypoint and optionally filter
+    live_by_ep: Dict[str, float] = {}
+    for name, R in live_by_name.items():
+        ep = name_to_ep.get(name, "load-generator")
+        if eps_filter is not None and ep not in eps_filter:
+            continue
+        live_by_ep[ep] = live_by_ep.get(ep, 0.0) + R  # if multiple names map to same ep, sum weights equally below
+    # If multiple names mapped to the same ep, average them
+    counts: Dict[str, int] = {}
+    for ep in name_to_ep.values():
+        counts[ep] = counts.get(ep, 0) + 1
+    for ep in list(live_by_ep.keys()):
+        c = max(1, counts.get(ep, 1))
+        live_by_ep[ep] = live_by_ep[ep] / c
 
     grid = _infer_p_grid(args.typed, args.p_grid)
     replica = args.replica or ""
