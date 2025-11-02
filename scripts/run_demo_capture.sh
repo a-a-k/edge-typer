@@ -29,6 +29,13 @@ services:
   otelcol:
     volumes:
       - ${RUN_DIR}/collector:/data
+  # Provide an explicit image for the load generator to handle upstream Compose changes
+  # Some versions of the OTel demo name it "loadgenerator" and others "load-generator".
+  # Declaring both ensures compatibility; Compose will merge/override if the service exists.
+  loadgenerator:
+    image: ghcr.io/open-telemetry/demo-loadgenerator:latest
+  load-generator:
+    image: ghcr.io/open-telemetry/demo-loadgenerator:latest
 YAML
 
 # 3) Bring up, wait for unhealthy/restarting to clear, soak, then down
