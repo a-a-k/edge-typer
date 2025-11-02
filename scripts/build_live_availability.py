@@ -86,10 +86,10 @@ def _compute_failures_by_name(failures_df: Optional[pd.DataFrame]) -> Dict[str, 
     return out
 
 
-def _extract_live_by_entrypoint(stats_df: pd.DataFrame,
-                                failures_map: Dict[str, int]) -> Dict[str, float]:
+def _extract_live_counts(stats_df: pd.DataFrame,
+                           failures_map: Dict[str, int]) -> Dict[str, tuple[float, float]]:
     """
-    Compute R_live per entrypoint from stats_df (+ optional failures_map).
+    Return per-request totals and bad counts: {request_name -> (total, bad)}.
     We try to read Requests and Failures columns from stats_df;
     if failures column is missing, we use failures_map (from failures.csv).
     """
@@ -105,31 +105,25 @@ def _extract_live_by_entrypoint(stats_df: pd.DataFrame,
     df[name_col] = df[name_col].astype(str)
     df = df[df[name_col].str.lower() != "total"]
 
-    live: Dict[str, float] = {}
+    out: Dict[str, tuple[float, float]] = {}
     for _, row in df.iterrows():
         name = str(row[name_col])
         try:
-            total = float(row[req_col])
+            total = float(pd.to_numeric(row[req_col], errors="coerce") or 0.0)
         except Exception:
             continue
         if not math.isfinite(total) or total <= 0:
             continue
         if fail_col and fail_col in row:
             try:
-                bad = float(row[fail_col])
+                bad = float(pd.to_numeric(row[fail_col], errors="coerce") or 0.0)
             except Exception:
-                bad = None
+                bad = 0.0
         else:
-            bad = None
-        if bad is None:
-            bad = float(failures_map.get(name, 0))
-        bad = max(0.0, bad)
-        good = max(0.0, total - bad)
-        R = good / total if total > 0 else 0.0
-        # Bound to [0,1]
-        R = min(1.0, max(0.0, R))
-        live[name] = R
-    return live
+            bad = float(failures_map.get(name, 0) or 0.0)
+        bad = max(0.0, min(bad, total))
+        out[name] = (total, bad)
+    return out
 
 
 def main() -> None:
@@ -142,18 +136,28 @@ def main() -> None:
     ap.add_argument("--targets",  required=False, type=Path,  help="optional targets.yaml with entrypoint mapping (regex)")
     ap.add_argument("--entrypoints", required=False, type=Path, help="optional entrypoints.csv to filter")
     ap.add_argument("--out",      required=True,  type=Path,  help="output live_availability.csv")
+    # Strict mode: fail fast on missing/empty inputs
+    ap.add_argument("--strict", dest="strict", action="store_true", help="fail if inputs are missing/empty", default=True)
+    ap.add_argument("--no-strict", dest="strict", action="store_false", help="silently skip on missing/empty inputs")
     args = ap.parse_args()
+
+    def _bail(msg: str, code: int = 1):
+        import sys
+        print(f"[availability-live] ERROR: {msg}", file=sys.stderr)
+        if args.strict:
+            raise SystemExit(code)
+        return
 
     stats_df = _read_csv(args.stats)
     if stats_df is None or stats_df.empty:
-        # Be quiet and exit 0 to keep the workflow optional
-        return
+        return _bail(f"stats CSV is missing or empty: {args.stats}", code=2)
     failures_df = _read_csv(args.failures) if args.failures else None
     failures_map = _compute_failures_by_name(failures_df)
 
-    live_by_name = _extract_live_by_entrypoint(stats_df, failures_map)
-    if not live_by_name:
-        return
+    # Extract per-request totals and bad counts
+    live_counts_by_name = _extract_live_counts(stats_df, failures_map)
+    if not live_counts_by_name:
+        return _bail("no valid per-request totals could be extracted from stats/failures CSVs", code=3)
 
     # Map request names to entrypoints; default: everything → 'load-generator'
     name_to_ep: Dict[str, str] = {}
@@ -175,7 +179,7 @@ def main() -> None:
                     pat = str(rule.get("name_regex") or rule.get("re") or ".*")
                     rules.append((str(ep), pat))
             import re
-            for name in live_by_name.keys():
+            for name in live_counts_by_name.keys():
                 ep_hit: Optional[str] = None
                 for ep, pat in rules:
                     try:
@@ -189,24 +193,25 @@ def main() -> None:
                             continue
                 name_to_ep[name] = ep_hit or "load-generator"
         except Exception:
-            name_to_ep = {name: "load-generator" for name in live_by_name.keys()}
+            name_to_ep = {name: "load-generator" for name in live_counts_by_name.keys()}
     else:
-        name_to_ep = {name: "load-generator" for name in live_by_name.keys()}
+        name_to_ep = {name: "load-generator" for name in live_counts_by_name.keys()}
 
-    # Aggregate by mapped entrypoint and optionally filter
-    live_by_ep: Dict[str, float] = {}
-    for name, R in live_by_name.items():
+    # Aggregate by mapped entrypoint and optionally filter using WEIGHTED totals
+    ep_totals: Dict[str, float] = {}
+    ep_bad: Dict[str, float] = {}
+    for name, (total, bad) in live_counts_by_name.items():
         ep = name_to_ep.get(name, "load-generator")
         if eps_filter is not None and ep not in eps_filter:
             continue
-        live_by_ep[ep] = live_by_ep.get(ep, 0.0) + R  # if multiple names map to same ep, sum weights equally below
-    # If multiple names mapped to the same ep, average them
-    counts: Dict[str, int] = {}
-    for ep in name_to_ep.values():
-        counts[ep] = counts.get(ep, 0) + 1
-    for ep in list(live_by_ep.keys()):
-        c = max(1, counts.get(ep, 1))
-        live_by_ep[ep] = live_by_ep[ep] / c
+        ep_totals[ep] = ep_totals.get(ep, 0.0) + float(total)
+        ep_bad[ep]    = ep_bad.get(ep, 0.0) + float(bad)
+
+    live_by_ep: Dict[str, float] = {}
+    for ep, tot in ep_totals.items():
+        bad = ep_bad.get(ep, 0.0)
+        R = 0.0 if tot <= 0 else max(0.0, min(1.0, 1.0 - (bad / tot)))
+        live_by_ep[ep] = R
 
     grid = _infer_p_grid(args.typed, args.p_grid)
     replica = args.replica or ""
@@ -220,6 +225,8 @@ def main() -> None:
                 "p_fail": float(p),
                 "R_live": float(rlive),
             })
+    if not out_rows:
+        return _bail("no entrypoints produced live availability rows (check targets/entrypoints filters)", code=4)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=["replica", "entrypoint", "p_fail", "R_live"])

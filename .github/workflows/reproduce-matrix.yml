@@ -127,12 +127,16 @@ jobs:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
+              command: >
+                /bin/sh -lc 'if ! echo "$LOCUST_OPTS" | grep -q -- "--csv"; then export LOCUST_OPTS="$LOCUST_OPTS --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
               volumes:
                 - "${RUN_DIR}:/data:rw"
             ${LG}:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
+              command: >
+                /bin/sh -lc 'if ! echo "$LOCUST_OPTS" | grep -q -- "--csv"; then export LOCUST_OPTS="$LOCUST_OPTS --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
               volumes:
                 - "${RUN_DIR}:/data:rw"
           YAML
@@ -142,7 +146,11 @@ jobs:
           # 4) Bring the demo up, soak, then tear it down
           mkdir -p "${RUN_DIR}/collector"
           # ensure the collector (non-root in container) can create the file
+          chmod 0777 "${RUN_DIR}"
           chmod 0777 "${RUN_DIR}/collector"
+          # Create a dedicated dir for Locust CSVs and make it writable
+          mkdir -p "${RUN_DIR}/locust"
+          chmod 0777 "${RUN_DIR}/locust"
 
           COMPOSE="$DEMO_DIR/docker-compose.yml"
           COMPOSE_OVERRIDE="$DEMO_DIR/docker-compose.override.yml"
@@ -298,11 +306,14 @@ jobs:
               --replica  "replicate-${REPL_ID}" \
               --targets  src/edgetyper/targets.yaml \
               --entrypoints "${RUN_DIR}/entrypoints.csv" \
-              --out      "${RUN_DIR}/live_availability.csv" || true
+              --out      "${RUN_DIR}/live_availability.csv"
             ls -l "${RUN_DIR}" || true
             echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
           else
-            echo "[live] No Locust *_stats.csv present; skipping."
+            echo "::error ::[live] No Locust *_stats.csv present in ${RUN_DIR}. Failing the job."
+            ls -lah "${RUN_DIR}" || true
+            ls -lah "${RUN_DIR}/collector" || true
+            exit 1
           fi
 
       - name: Upload replica artifact
