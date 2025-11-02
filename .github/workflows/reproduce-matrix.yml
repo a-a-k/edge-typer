@@ -86,7 +86,7 @@ jobs:
             exit 1
           fi
           export COMPOSE_CMD
-          echo "Using COMPOSE='${COMPOSE_CMD}'"
+          echo "Using COMPOSE_CMD='${COMPOSE_CMD}'"
 
           # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
           if [[ ! -d vendor/opentelemetry-demo ]]; then
@@ -112,8 +112,10 @@ jobs:
           YAML
         
           # 3) Compose override to mount a host directory for /data so the JSON lands in $RUN_DIR/collector
-          # Determine the load generator service key (loadgenerator vs load-generator)
-          LG=$(awk '/^[[:space:]]{2}loadgenerator:|^[[:space:]]{2}load-generator:/{gsub(":",""); gsub(" ",""); print $1; exit}' "$COMPOSE")
+          # Resolve compose YAML path and then determine the load generator service key (loadgenerator vs load-generator)
+          COMPOSE="${DEMO_DIR}/docker-compose.yml"
+          # (awk reads the YAML file; do NOT pass the CLI here)
+          LG=$(awk '/^[[:space:]]{2}(loadgenerator|load-generator):/{sub(":",""); gsub(" ",""); print $1; exit}' "$COMPOSE")
           LG=${LG:-loadgenerator}
           cat > "${DEMO_DIR}/docker-compose.override.yml" <<YAML
           services:
@@ -143,7 +145,7 @@ jobs:
           COMPOSE_OVERRIDE="$DEMO_DIR/docker-compose.override.yml"
           COMPOSE_OPTS="-f $COMPOSE -f $COMPOSE_OVERRIDE"
           
-          docker compose $COMPOSE_OPTS up --force-recreate --remove-orphans --detach
+          $COMPOSE_CMD $COMPOSE_OPTS up --force-recreate --remove-orphans --detach
           echo "Soaking for ${SOAK_SECONDS}s..."
           sleep "${SOAK_SECONDS}"
           
@@ -152,7 +154,7 @@ jobs:
             exit 1
           }
 
-          docker compose $COMPOSE_OPTS down -v || true
+          $COMPOSE_CMD $COMPOSE_OPTS down -v || true
         
           # 5) Verify trace JSON and extract to Parquet
           if [[ ! -s "${RUN_DIR}/collector/otel-traces.json" ]]; then
@@ -185,13 +187,12 @@ jobs:
               --targets src/edgetyper/targets.yaml \
               --out "${RUN_DIR}/entrypoints.csv"
           else
-            python - <<'PY'
+            python - "$RUN_DIR/entrypoints.csv" <<'PY'
             import sys, csv, yaml, pathlib
             cfg=yaml.safe_load(open("src/edgetyper/targets.yaml"))
             eps=list((cfg.get("entrypoints") or {}).keys())
             pathlib.Path(sys.argv[1]).write_text("entrypoint\n" + "\n".join(eps) + "\n")
             PY
-            "${RUN_DIR}/entrypoints.csv"
           fi
           echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
           
