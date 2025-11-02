@@ -186,11 +186,11 @@ jobs:
               --out "${RUN_DIR}/entrypoints.csv"
           else
             python - <<'PY'
-import sys, csv, yaml, pathlib
-cfg=yaml.safe_load(open("src/edgetyper/targets.yaml"))
-eps=list((cfg.get("entrypoints") or {}).keys())
-pathlib.Path(sys.argv[1]).write_text("entrypoint\n" + "\n".join(eps) + "\n")
-PY
+            import sys, csv, yaml, pathlib
+            cfg=yaml.safe_load(open("src/edgetyper/targets.yaml"))
+            eps=list((cfg.get("entrypoints") or {}).keys())
+            pathlib.Path(sys.argv[1]).write_text("entrypoint\n" + "\n".join(eps) + "\n")
+            PY
             "${RUN_DIR}/entrypoints.csv"
           fi
           echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
