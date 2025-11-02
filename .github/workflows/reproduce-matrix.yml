@@ -75,6 +75,18 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUN_DIR/collector"
           DEMO_DIR="${DEMO_DIR:-"$GITHUB_WORKSPACE/vendor/opentelemetry-demo"}"
+          
+          # Compose shim: prefer 'docker compose', fallback to classic 'docker-compose'
+          if docker compose version >/dev/null 2>&1; then
+            COMPOSE="docker compose"
+          elif command -v docker-compose >/dev/null 2>&1; then
+            COMPOSE="docker-compose"
+          else
+            echo "::error ::Neither 'docker compose' nor 'docker-compose' is available" >&2
+            exit 1
+          fi
+          export COMPOSE
+          echo "Using COMPOSE='${COMPOSE}'"
 
           # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
           if [[ ! -d vendor/opentelemetry-demo ]]; then
@@ -109,11 +121,6 @@ jobs:
               volumes:
                 - "${RUN_DIR}/collector:/data:rw"
             loadgenerator:
-              environment:
-                - LOCUST_OPTS=--csv /data/locust --csv-full-history
-              volumes:
-                - "${RUN_DIR}:/data:rw"
-            load-generator:
               environment:
                 - LOCUST_OPTS=--csv /data/locust --csv-full-history
               volumes:
@@ -264,6 +271,7 @@ jobs:
 
       - name: Build live availability from Locust CSV (optional)
         shell: bash
+        env: { COMPOSE: "docker compose" }
         run: |
           set -euo pipefail
           # Locust CSVs are emitted by the load generator into $RUN_DIR via compose override.
