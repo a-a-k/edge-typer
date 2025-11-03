@@ -201,6 +201,13 @@ jobs:
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode semconv --out "${RUN_DIR}/pred_semconv.csv"
           edgetyper baseline --features "${RUN_DIR}/features.parquet" --mode timing  --out "${RUN_DIR}/pred_timing.csv"
           edgetyper label    --features "${RUN_DIR}/features.parquet"              --out "${RUN_DIR}/pred_ours.csv"
+          # Export graph.json (service graph + features + predictions)
+          python scripts/export_graph_json.py \
+            --edges "${RUN_DIR}/edges.parquet" \
+            --features "${RUN_DIR}/features.parquet" \
+            --pred "${RUN_DIR}/pred_ours.csv" \
+            --out "${RUN_DIR}/graph.json"
+
           # Freeze entrypoints for model/live parity
           # Prefer helper script; fall back to tiny inline Python if the script is absent.
           if [[ -f scripts/targets_to_entrypoints.py ]]; then
@@ -319,6 +326,13 @@ jobs:
               --out      "${RUN_DIR}/live_availability.csv"
             ls -l "${RUN_DIR}" || true
             echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
+            # Export availability.json (typed + all-block + live)
+            python scripts/export_availability_json.py \
+              --typed "${RUN_DIR}/availability_typed.csv" \
+              --blocking "${RUN_DIR}/availability_block.csv" \
+              --live "${RUN_DIR}/live_availability.csv" \
+              --out "${RUN_DIR}/availability.json"
+
           else
             echo "::error ::[live] No Locust *_stats.csv present in ${RUN_DIR}. Failing the job."
             ls -lah "${RUN_DIR}" || true
@@ -336,6 +350,8 @@ jobs:
             ${{ env.RUN_DIR }}/plan_all_blocking.csv
             ${{ env.RUN_DIR }}/availability_typed.csv
             ${{ env.RUN_DIR }}/availability_block.csv
+            ${{ env.RUN_DIR }}/availability.json
+            ${{ env.RUN_DIR }}/graph.json
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
             ${{ env.RUN_DIR }}/live_availability.csv

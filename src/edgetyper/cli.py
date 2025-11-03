@@ -691,6 +691,16 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     if coverage_html: html.append(coverage_html)
     if prov_html:     html.append(prov_html)
     dl = ["<h2>Downloads</h2><ul>"]
+    # Include JSON artifacts if present
+    try:
+        for _name in ("graph.json", "availability.json"):
+            _p = metrics_dir / _name
+            if _p.exists():
+                shutil.copyfile(_p, assets / _name)
+                dl.append(f"<li><a href='data/{_name}' download>{_name}</a></li>")
+    except Exception:
+        pass
+
     if (assets / "coverage_unmatched_top.csv").exists():
         dl.append("<li><a href='data/coverage_unmatched_top.csv' download>coverage_unmatched_top.csv</a></li>")
     if (assets / "top_services.csv").exists():
@@ -716,6 +726,68 @@ def report_cmd(metrics_dir: Path, outdir: Path, spans_path: Path | None, events_
     if debug_link_html: dl.append(debug_link_html)
     dl.append("</ul>")
     html.extend(dl)
+
+    # ---------- Availability (table) ----------
+    try:
+        av_t, av_b, av_l = None, None, None
+        if availability_typed_csv:
+            av_t = pd.read_csv(availability_typed_csv).rename(columns={"R_model":"R_model_typed"})
+        if availability_block_csv:
+            av_b = pd.read_csv(availability_block_csv).rename(columns={"R_model":"R_model_block"})
+        live_csv_path = metrics_dir / "live_availability.csv"
+        if live_csv_path.exists():
+            av_l = pd.read_csv(live_csv_path)
+        mix = None
+        def _num(x):
+            try:
+                return float(x)
+            except Exception:
+                return None
+        if av_t is not None:
+            av_t["p_fail"] = av_t["p_fail"].apply(_num)
+            mix = av_t
+        if av_b is not None:
+            av_b["p_fail"] = av_b["p_fail"].apply(_num)
+            mix = mix.merge(av_b, on=["entrypoint","p_fail"], how="outer") if mix is not None else av_b
+        if av_l is not None:
+            av_l["p_fail"] = av_l["p_fail"].apply(_num)
+            mix = mix.merge(av_l, on=["entrypoint","p_fail"], how="left") if mix is not None else av_l
+            if "R_live" in mix.columns:
+                if "R_model_typed" in mix.columns:
+                    mix["MAE_typed"] = (mix["R_model_typed"] - mix["R_live"]).abs()
+                if "R_model_block" in mix.columns:
+                    mix["MAE_block"] = (mix["R_model_block"] - mix["R_live"]).abs()
+        if mix is not None and not mix.empty:
+            mix = mix.sort_values(["entrypoint","p_fail"]).reset_index(drop=True)
+            def _fmt3(val):
+                try:
+                    return f"{float(val):.3f}"
+                except Exception:
+                    return "—"
+            rows = []
+            for r in mix.itertuples(index=False):
+                rows.append(
+                    "<tr>"
+                    f"<td>{getattr(r,'entrypoint','')}</td>"
+                    f"<td>{getattr(r,'p_fail','')}</td>"
+                    f"<td>{_fmt3(getattr(r,'R_model_typed', float('nan')))}</td>"
+                    f"<td>{_fmt3(getattr(r,'R_model_block', float('nan')))}</td>"
+                    f"<td>{_fmt3(getattr(r,'R_live', float('nan')))}</td>"
+                    f"<td>{_fmt3(getattr(r,'MAE_typed', float('nan')))}</td>"
+                    f"<td>{_fmt3(getattr(r,'MAE_block', float('nan')))}</td>"
+                    "</tr>"
+                )
+            html.append("<h2>Availability</h2>")
+            html.append(
+                "<table><thead><tr>"
+                "<th>Entrypoint</th><th>p_fail</th>"
+                "<th>Typed (R_model)</th><th>All‑blocking (R_model)</th>"
+                "<th>Live (R_live)</th><th>MAE typed</th><th>MAE all‑block</th>"
+                "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+            )
+    except Exception:
+        pass
+
 
     # ---------- interpretation ----------
     html.append("<h2>Interpretation</h2><ul>"
