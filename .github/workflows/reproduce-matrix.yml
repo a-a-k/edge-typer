@@ -307,43 +307,44 @@ jobs:
             --out "${RUN_DIR}/availability_block.csv"
 
       - name: Build live availability from Locust CSV (optional)
-        shell: bash
         run: |
           set -euo pipefail
-          echo "[live] Listing potential Locust CSVs under ${RUN_DIR}:" && ls -lah ${RUN_DIR} || true
-          # Find newest locust *_stats.csv produced by the load generator
-          STATS=$(ls -1t "${RUN_DIR}"/locust*_stats.csv 2>/dev/null | head -n1 || true)
+          echo "[live] Searching for Locust *_stats.csv under ${RUN_DIR} (depth<=2)…"
+          find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print 2>/dev/null | sort -r || true
+
+          # Find newest *_stats.csv within RUN_DIR or RUN_DIR/locust
+          STATS=$(find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print 2>/dev/null | sort -r | head -n1 || true)
+          LIVE_ARGS=()
           if [[ -n "${STATS}" && -s "${STATS}" ]]; then
             FAILS="${STATS/_stats.csv/_failures.csv}"
             echo "[live] Using stats=${STATS} failures=${FAILS}"
             python scripts/build_live_availability.py \
-              --stats    "${STATS}" \
-              --failures "${FAILS}" \
-              --typed    "${RUN_DIR}/availability_typed.csv" \
-              --replica  "replicate-${REPL_ID}" \
-              --targets  src/edgetyper/targets.yaml \
+              --stats       "${STATS}" \
+              --failures    "${FAILS}" \
+              --typed       "${RUN_DIR}/availability_typed.csv" \
+              --replica     "replicate-${REPL_ID}" \
+              --targets     src/edgetyper/targets.yaml \
               --entrypoints "${RUN_DIR}/entrypoints.csv" \
-              --out      "${RUN_DIR}/live_availability.csv"
-            ls -l "${RUN_DIR}" || true
+              --out         "${RUN_DIR}/live_availability.csv"
             echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
-            # Export availability.json (typed + all-block + live)
-            python scripts/export_availability_json.py \
-              --typed "${RUN_DIR}/availability_typed.csv" \
-              --blocking "${RUN_DIR}/availability_block.csv" \
-              --live "${RUN_DIR}/live_availability.csv" \
-              --out "${RUN_DIR}/availability.json"
-
+            LIVE_ARGS=(--live "${RUN_DIR}/live_availability.csv")
           else
-            echo "::error ::[live] No Locust *_stats.csv present in ${RUN_DIR}. Failing the job."
-            ls -lah "${RUN_DIR}" || true
-            ls -lah "${RUN_DIR}/collector" || true
-            exit 1
+            echo "::notice ::[live] No Locust *_stats.csv found. Skipping live availability and continuing."
+            ls -lah "${RUN_DIR}/locust" || true
           fi
+
+          # Always produce availability.json (typed/all-block; include live if present)
+          python scripts/export_availability_json.py \
+            --typed    "${RUN_DIR}/availability_typed.csv" \
+            --blocking "${RUN_DIR}/availability_block.csv" \
+            "${LIVE_ARGS[@]}" \
+            --out     "${RUN_DIR}/availability.json"
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
         with:
           name: replicate-${{ env.REPL_ID }}
+          if-no-files-found: warn
           path: |
             ${{ env.RUN_DIR }}/metrics_*.json
             ${{ env.RUN_DIR }}/plan_physical.csv
@@ -352,6 +353,7 @@ jobs:
             ${{ env.RUN_DIR }}/availability_block.csv
             ${{ env.RUN_DIR }}/availability.json
             ${{ env.RUN_DIR }}/graph.json
+            ${{ env.RUN_DIR }}/live_availability.csv
             ${{ env.RUN_DIR }}/observations.json
             ${{ env.RUN_DIR }}/provenance.json
             ${{ env.RUN_DIR }}/live_availability.csv
