@@ -69,6 +69,54 @@ def discover_replicas(root_candidates: list[Path]) -> list[Path]:
             seen.add(rp)
     return uniq
 
+# --- NEW: rebuild edges + predictions from graph.json (present in artifacts) ---
+def _rebuild_from_graph_json(replica_dir: Path) -> bool:
+    gpath = replica_dir / "graph.json"
+    if not gpath.exists():
+        return False
+    try:
+        obj = json.loads(gpath.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    edges, preds = [], []
+    for e in obj.get("edges", []):
+        s = str(e.get("source", "")); t = str(e.get("target", ""))
+        if not s or not t:
+            continue
+        counts = e.get("counts", {}) or {}
+        edges.append({
+            "src_service": s,
+            "dst_service": t,
+            "n_events":    counts.get("n_events", 0),
+            "n_rpc":       counts.get("n_rpc", 0),
+            "n_messaging": counts.get("n_messaging", 0),
+            "n_links":     counts.get("n_links", 0),
+            "n_errors":    counts.get("n_errors", 0),
+        })
+        pred = e.get("prediction", {}) or {}
+        if "label" in pred:
+            preds.append({
+                "src_service": s,
+                "dst_service": t,
+                "pred_label":  pred.get("label"),
+                "pred_score":  pred.get("score", None),
+            })
+    if not edges:
+        return False
+    _ensure_pkg_installed()  # brings in pyarrow for parquet I/O
+    try:
+        pd.DataFrame(edges).to_parquet(replica_dir / "edges.parquet", index=False)
+        if preds:
+            pd.DataFrame(preds).to_csv(replica_dir / "pred_ours.csv", index=False)
+        elif not (replica_dir / "pred_ours.csv").exists():
+            # conservative default if json lacked predictions
+            pd.DataFrame([{"src_service": r["src_service"], "dst_service": r["dst_service"], "pred_label": "sync"} for r in edges]) \
+              .to_csv(replica_dir / "pred_ours.csv", index=False)
+        return True
+    except Exception as e:
+        print(f"::warning ::[{replica_dir.name}] Failed to rebuild from graph.json: {e}")
+        return False
+
 # --------------------- entrypoint discovery ----------------------------
 
 def _guess_entrypoints_from_edges(edges_parquet: Path) -> list[str]:
@@ -161,8 +209,12 @@ def ensure_availability(replica_dir: Path, p_fail_grid: Optional[list[float]] = 
         return typed_p if typed_p.exists() else None, block_p if block_p.exists() else None
 
     if not edges_p.exists() or not pred_p.exists():
-        print(f"::warning ::[{replica_dir.name}] Missing edges.parquet or pred_ours.csv; cannot recompute availability.")
-        return typed_p if typed_p.exists() else None, block_p if block_p.exists() else None
+        if _rebuild_from_graph_json(replica_dir):
+            edges_p = replica_dir / "edges.parquet"
+            pred_p = replica_dir / "pred_ours.csv"
+        else:
+            print(f"::warning ::[{replica_dir.name}] Missing edges.parquet or pred_ours.csv; cannot recompute availability.")
+            return typed_p if typed_p.exists() else None, block_p if block_p.exists() else None
 
     _ensure_pkg_installed()
     ep_txt = ensure_entrypoints(replica_dir)
