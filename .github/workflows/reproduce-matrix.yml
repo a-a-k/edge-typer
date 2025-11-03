@@ -359,6 +359,10 @@ jobs:
             ${{ env.RUN_DIR }}/live_availability.csv
             ${{ env.RUN_DIR }}/locust*_stats*.csv
             ${{ env.RUN_DIR }}/locust*_failures*.csv
+            ${{ env.RUN_DIR }}/edges.parquet
+            ${{ env.RUN_DIR }}/pred_ours.csv
+            ${{ env.RUN_DIR }}/entrypoints.txt
+            ${{ env.RUN_DIR }}/entrypoints.csv
 
       - name: Build report site
         run: python -m edgetyper.cli report --metrics "${{ env.RUN_DIR }}" --out site
