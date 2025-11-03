@@ -405,6 +405,17 @@ jobs:
         run: |
           AVAIL_ONLY=1 python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
 
+      - name: Build aggregate site (Availability section)
+        run: |
+          set -euo pipefail
+          # replicas are downloaded by the job into ./replicas (standard actions/download-artifact destination)
+          ls -lah replicas || true
+          # Generate Availability tables + aggregate artifacts and overwrite site/index.html
+          python scripts/aggregate_site_v2.py \
+            --replicas-root "replicas" \
+            --site "site"
+          echo "[aggregate] Done. Listing site/data:" && ls -lah site/data || true
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
