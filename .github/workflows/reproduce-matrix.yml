@@ -233,20 +233,24 @@ jobs:
           print("[entrypoints.txt]", vals)
           PY
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
-          # ALSO write newline-delimited entrypoints for 'edgetyper resilience'
+
+          # Audit: compare entrypoints vs edges.parquet services (first 5 present/missing)
           python - <<'PY'
-          import os, pandas as pd, pathlib
-          run = os.environ["RUN_DIR"]
-          df  = pd.read_csv(f"{run}/entrypoints.csv")
-          col = df.columns[0]
-          eps = [str(x) for x in df[col].dropna().astype(str).tolist()]
-          pathlib.Path(f"{run}/entrypoints.txt").write_text(
-              ("\n".join(eps) + ("\n" if eps else ""))
-          )
-          print("[entrypoints.txt]", eps)
+          import pandas as pd, os
+          run = os.environ['RUN_DIR']
+          eps = [ln.strip() for ln in open(f"{run}/entrypoints.txt", 'r', encoding='utf-8').read().splitlines() if ln.strip()]
+          try:
+              edges = pd.read_parquet(f"{run}/edges.parquet")
+              sv = pd.unique(pd.concat([edges['src_service'].astype(str), edges['dst_service'].astype(str)])).tolist()
+          except Exception:
+              sv = []
+          present = [e for e in eps if e in sv][:5]
+          missing = [e for e in eps if e not in sv][:5]
+          print(f"[audit] entrypoints passed to resilience: entrypoints.txt")
+          print(f"[audit] edges services (first 10): {sv[:10]}")
+          print(f"[audit] entrypoints present in graph (first 5): {present}")
+          print(f"[audit] entrypoints NOT found in graph (first 5): {missing}")
           PY
-          echo "[entrypoints.txt]"
-          cat "${RUN_DIR}/entrypoints.txt" || true
           
           # Robustness masks
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_drop.parquet" --mask-semconv
@@ -323,6 +327,8 @@ jobs:
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_typed.csv"
+          echo "[typed] lines: $(wc -l < "${RUN_DIR}/availability_typed.csv" 2>/dev/null || echo 0)"
+          echo "[typed] head:" && head -n 10 "${RUN_DIR}/availability_typed.csv" || true
 
       - name: Monte‑Carlo availability (all‑blocking)
         run: |
@@ -334,6 +340,8 @@ jobs:
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_block.csv"
+          echo "[all-block] lines: $(wc -l < "${RUN_DIR}/availability_block.csv" 2>/dev/null || echo 0)"
+          echo "[all-block] head:" && head -n 10 "${RUN_DIR}/availability_block.csv" || true
 
       - name: Build live availability from Locust CSV (optional)
         run: |
@@ -429,10 +437,12 @@ jobs:
 
       - name: Sanity-check downloaded artifacts
         run: |
-          echo "=== tree replicas ==="
-          find replicas -maxdepth 2 -type f -print | sed 's#^#  #'
+          echo "=== tree replicas (depth<=2) ==="
+          find replicas -maxdepth 2 -type f -print | sed 's#^#  #' 
           echo "=== metrics present? ==="
           find replicas -type f \( -name 'observations.json' -o -name 'metrics_*json' \) -print | sed 's#^#  #'
+          echo "=== availability files discovered recursively ==="
+          find replicas -type f -name 'availability_*' -print | sed 's#^#  #'
 
       - name: Aggregate replicas → site/
         run: |
@@ -444,19 +454,21 @@ jobs:
           # replicas are downloaded by the job into ./replicas (standard actions/download-artifact destination)
           ls -lah replicas || true
           # Generate Availability tables + aggregate artifacts and overwrite site/index.html
-          if python scripts/aggregate_site_v5.py --replicas-root "replicas" --site "site"; then
+          if [ -f scripts/aggregate_site_v5.py ]; then
+            python scripts/aggregate_site_v5.py --replicas-root "replicas" --site "site"
             echo "[aggregate] v5 OK"
-          elif [ -f scripts/aggregate_site_v4.py ] && \
-               python scripts/aggregate_site_v4.py --replicas-root "replicas" --site "site"; then
+          elif [ -f scripts/aggregate_site_v4.py ]; then
+            python scripts/aggregate_site_v4.py --replicas-root "replicas" --site "site"
             echo "[aggregate] v4 OK"
-          elif [ -f scripts/aggregate_site_v3.py ] && \
-               python scripts/aggregate_site_v3.py --replicas-root "replicas" --site "site"; then
+          elif [ -f scripts/aggregate_site_v3.py ]; then
+            python scripts/aggregate_site_v3.py --replicas-root "replicas" --site "site"
             echo "[aggregate] v3 OK"
           else
             echo "::error ::No aggregate script found"
             exit 1
           fi
           echo "[aggregate] Done. Listing site/data:" && ls -lah site/data || true
+          echo "[aggregate] Preview pooled CSVs:" && for f in site/data/*.csv; do echo "-- $f"; head -n 10 "$f" || true; done
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

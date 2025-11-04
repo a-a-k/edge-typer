@@ -1627,16 +1627,34 @@ def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None
         else:
             click.echo(f"[resilience] replicas file not found: {rp} — defaulting to 1 per service", err=True)
 
-    # entrypoints
+    # entrypoints (filter to services present in graph; fallback if none)
     if eps_path:
         try:
             eps_df = pd.read_csv(eps_path)
             col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
-            entrypoints = [str(x) for x in eps_df[col].tolist()]
+            entrypoints = [str(x) for x in eps_df[col].dropna().astype(str).tolist()]
         except Exception:
             entrypoints = [ln.strip() for ln in Path(eps_path).read_text().splitlines() if ln.strip()]
     else:
         entrypoints = guess_entrypoints(adj)
+
+    # Filter to nodes present in the blocking graph
+    services = set(adj.keys()) | {v for vs in adj.values() for v in vs}
+    eps_in = [e for e in entrypoints if e in services]
+    if not eps_in:
+        click.echo("[resilience] Provided entrypoints do not match the graph — guessing from graph indegree-0/top-degree", err=True)
+        entrypoints = guess_entrypoints(adj)
+        eps_in = [e for e in entrypoints if e in services]
+    else:
+        entrypoints = eps_in
+
+    # Visibility: log final entrypoints and first services from edges
+    try:
+        all_services = pd.unique(pd.concat([edges['src_service'].astype(str), edges['dst_service'].astype(str)])).tolist()
+        click.echo(f"[resilience] edges services (first 10): {all_services[:10]}")
+    except Exception:
+        pass
+    click.echo(f"[resilience] using entrypoints: {entrypoints}")
 
     cfg = SimConfig(p_fail=list(p_fail), samples=int(samples), seed=int(seed))
     out = estimate_availability(adj, replicas, entrypoints, cfg)

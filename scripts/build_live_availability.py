@@ -134,7 +134,7 @@ def main() -> None:
     ap.add_argument("--replica",  required=False, type=str,   help="replicate-* name to stamp into 'replica' column")
     ap.add_argument("--p-grid",   required=False, type=str,   help="explicit grid, e.g. '0.1,0.3,0.5,0.7,0.9'")
     ap.add_argument("--targets",  required=False, type=Path,  help="optional targets.yaml with entrypoint mapping (regex)")
-    ap.add_argument("--entrypoints", required=False, type=Path, help="optional entrypoints.csv to filter")
+    ap.add_argument("--entrypoints", required=False, type=Path, help="optional entrypoints (CSV with column 'entrypoint' or newline-delimited .txt) to filter")
     ap.add_argument("--out",      required=True,  type=Path,  help="output live_availability.csv")
     # Strict mode: fail fast on missing/empty inputs
     ap.add_argument("--strict", dest="strict", action="store_true", help="fail if inputs are missing/empty", default=True)
@@ -166,9 +166,13 @@ def main() -> None:
         try:
             df_eps = pd.read_csv(args.entrypoints)
             col = "entrypoint" if "entrypoint" in df_eps.columns else df_eps.columns[0]
-            eps_filter = set(str(x) for x in df_eps[col].dropna().tolist())
+            eps_filter = set(str(x) for x in df_eps[col].dropna().astype(str).tolist())
         except Exception:
-            pass
+            # fallback to newline-delimited .txt
+            try:
+                eps_filter = set(ln.strip() for ln in args.entrypoints.read_text(encoding="utf-8").splitlines() if ln.strip())
+            except Exception:
+                eps_filter = None
     if args.targets and args.targets.exists():
         import yaml
         try:

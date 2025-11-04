@@ -219,6 +219,20 @@ def ensure_availability(replica_dir: Path, pgrid: list[float]) -> Tuple[Optional
             return typed_p if typed_p.exists() else None, block_p if block_p.exists() else None
     _ensure_pkg()
     ep_txt = ensure_entrypoints(replica_dir)
+    # Log entrypoints used
+    try:
+        print(f"[{replica_dir.name}] entrypoints.txt:")
+        print((replica_dir/"entrypoints.txt").read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    # Also log first services from edges to debug name matching
+    try:
+        import pandas as _pd
+        _e = _pd.read_parquet(edges)
+        _sv = _pd.unique(_pd.concat([_e['src_service'].astype(str), _e['dst_service'].astype(str)])).tolist()
+        print(f"[{replica_dir.name}] edges services (first 10): {_sv[:10]}")
+    except Exception:
+        pass
     pf_args: list[str] = []
     for p in pgrid:
         try: pf_args += ["--p-fail", f"{float(p)}"]
@@ -232,6 +246,15 @@ def ensure_availability(replica_dir: Path, pgrid: list[float]) -> Tuple[Optional
         print(f"[{replica_dir.name}] recomputing all-blocking…"); subprocess.run(cmd_b, check=True)
     except subprocess.CalledProcessError as e:
         print(f"::warning ::[{replica_dir.name}] resilience failed: {e}")
+    # Log row counts and heads
+    try:
+        for lab, path in (("typed", typed_p), ("all-block", block_p)):
+            if path.exists():
+                txt = path.read_text(encoding="utf-8").splitlines()
+                print(f"[{replica_dir.name}] availability_{lab}.csv lines={len(txt)}")
+                print("\n".join(txt[:10]))
+    except Exception:
+        pass
     # final guard: if still empty, try a last-ditch entrypoint = first node in graph.json (if any)
     if _header_only_or_empty(typed_p) or _header_only_or_empty(block_p):
         g = _find_first(replica_dir, "graph.json")
@@ -257,10 +280,22 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
     pgrid = [float(x) for x in grid_env.split()] if grid_env else DEFAULT_PFAIL_GRID
     for rdir in replicas:
         rid = rdir.name
+        # ensure top-level files exist or copy nested ones up
+        _copy_if_nested(rdir, "availability_typed.csv")
+        _copy_if_nested(rdir, "availability_block.csv")
+        _copy_if_nested(rdir, "live_availability.csv")
         ensure_availability(rdir, pgrid)
-        t = _read_csv(rdir / "availability_typed.csv", ["entrypoint","p_fail","R_model"])
-        b = _read_csv(rdir / "availability_block.csv", ["entrypoint","p_fail","R_model"])
-        l = _read_csv(rdir / "live_availability.csv",  ["entrypoint","p_fail","R_live"])
+        tpath = rdir / "availability_typed.csv"
+        bpath = rdir / "availability_block.csv"
+        lpath = rdir / "live_availability.csv"
+        # warn on header-only
+        if tpath.exists() and _header_only_or_empty(tpath):
+            print(f"::warning ::[{rid}] availability_typed.csv is header-only or empty; skipping")
+        if bpath.exists() and _header_only_or_empty(bpath):
+            print(f"::warning ::[{rid}] availability_block.csv is header-only or empty; skipping")
+        t = _read_csv(tpath, ["entrypoint","p_fail","R_model"])
+        b = _read_csv(bpath, ["entrypoint","p_fail","R_model"])
+        l = _read_csv(lpath,  ["entrypoint","p_fail","R_live"])
         if t is not None and not t.empty: typed_all.append(t.assign(replica=rid))
         if b is not None and not b.empty: block_all.append(b.assign(replica=rid))
         if l is not None and not l.empty: live_all.append(l.assign(replica=rid))
@@ -307,14 +342,17 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
     if agg_all is None:
         agg_all = pd.DataFrame(columns=["entrypoint","p_fail","typed_mean","typed_std","n_typed","block_mean","block_std","n_block","R_live_mean","n_live","MAE_typed_mean","MAE_block_mean"])
     agg_all.sort_values(["entrypoint","p_fail"], inplace=True, ignore_index=True)
-    # write aggregate artifacts
-    (data/"availability_aggregate.csv").write_text(agg_all.to_csv(index=False), encoding="utf-8")
-    (data/"availability_aggregate.json").write_text(json.dumps({
-        "schema":"edgetyper-availability-aggregate@v1",
-        "generated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "replicas":[p.name for p in replicas],
-        "by_entrypoint":agg_all.to_dict(orient="records"),
-    }, indent=2), encoding="utf-8")
+    # write aggregate artifacts only when we have rows
+    if not agg_all.empty:
+        (data/"availability_aggregate.csv").write_text(agg_all.to_csv(index=False), encoding="utf-8")
+        (data/"availability_aggregate.json").write_text(json.dumps({
+            "schema":"edgetyper-availability-aggregate@v1",
+            "generated_at":time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "replicas":[p.name for p in replicas],
+            "by_entrypoint":agg_all.to_dict(orient="records"),
+        }, indent=2), encoding="utf-8")
+    else:
+        print("::warning ::no non-empty availability rows found across replicas; not writing aggregate CSV/JSON")
     # carry over existing top files into data/ if present
     for fname in ("aggregate_summary.json","replicas_summary.csv"):
         src = site/fname
@@ -366,16 +404,16 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         + "</tbody></table>"
     )
     (site/"index.html").write_text(html, encoding="utf-8")
-    print(f"[aggregate_site_v5] wrote {site/'index.html'} and {data/'availability_aggregate.csv'}")
+    print(f"[aggregate_site_v5] wrote {site/'index.html'} and (if any) aggregate CSV/JSON under {data}")
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--replicas-root", default="replicas")
+    ap.add_argument("--replicas-root", dest="replicas_root", default="replicas")
     ap.add_argument("--site", default="site")
     args = ap.parse_args()
-    reps = discover_replicas([Path(args.replicas-root) if hasattr(args,'replicas-root') else Path(args.replicas_root),
-                              Path("replicas"), Path("artifacts"), Path("runs")])
-    if not reps: print("::warning ::no replicas discovered; page will be empty")
+    reps = discover_replicas([Path(args.replicas_root), Path("replicas"), Path("artifacts"), Path("runs")])
+    if not reps:
+        print("::warning ::no replicas discovered; page will be empty")
     build_aggregate(reps, Path(args.site))
 
 if __name__ == "__main__":
