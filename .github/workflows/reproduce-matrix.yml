@@ -218,6 +218,20 @@ jobs:
             python -c "import yaml, pathlib; cfg=yaml.safe_load(open('src/edgetyper/targets.yaml')); eps=list((cfg.get('entrypoints') or {}).keys()); pathlib.Path(r'${RUN_DIR}/entrypoints.csv').write_text('entrypoint\n' + '\n'.join(eps) + '\n')"
           fi
           echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
+          # ALSO write newline-delimited entrypoints for 'edgetyper resilience'
+          python - <<'PY'
+          import os, pandas as pd, pathlib
+          run = os.environ["RUN_DIR"]
+          df  = pd.read_csv(f"{run}/entrypoints.csv")
+          col = df.columns[0]
+          eps = [str(x) for x in df[col].dropna().astype(str).tolist()]
+          pathlib.Path(f"{run}/entrypoints.txt").write_text(
+              ("\n".join(eps) + ("\n" if eps else ""))
+          )
+          print("[entrypoints.txt]", eps)
+          PY
+          echo "[entrypoints.txt]"
+          cat "${RUN_DIR}/entrypoints.txt" || true
           
           # Robustness masks
           edgetyper featurize --events "${RUN_DIR}/events.parquet" --edges "${RUN_DIR}/edges.parquet" --out "${RUN_DIR}/features_semconv_drop.parquet" --mask-semconv
@@ -290,7 +304,7 @@ jobs:
           edgetyper resilience \
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
-            --entrypoints "${RUN_DIR}/entrypoints.csv" \
+            --entrypoints "${RUN_DIR}/entrypoints.txt" \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_typed.csv"
@@ -301,7 +315,7 @@ jobs:
             --edges "${RUN_DIR}/edges.parquet" \
             --pred  "${RUN_DIR}/pred_ours.csv" \
             --assume-all-blocking \
-            --entrypoints "${RUN_DIR}/entrypoints.csv" \
+            --entrypoints "${RUN_DIR}/entrypoints.txt" \
             --p-fail 0.1 --p-fail 0.3 --p-fail 0.5 --p-fail 0.7 --p-fail 0.9 \
             --samples 900000 \
             --out "${RUN_DIR}/availability_block.csv"
@@ -324,7 +338,7 @@ jobs:
               --typed       "${RUN_DIR}/availability_typed.csv" \
               --replica     "replicate-${REPL_ID}" \
               --targets     src/edgetyper/targets.yaml \
-              --entrypoints "${RUN_DIR}/entrypoints.csv" \
+              --entrypoints "${RUN_DIR}/entrypoints.txt" \
               --out         "${RUN_DIR}/live_availability.csv"
             echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
             LIVE_ARGS=(--live "${RUN_DIR}/live_availability.csv")
