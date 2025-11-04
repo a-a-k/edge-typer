@@ -10,7 +10,7 @@ EdgeTyper — Aggregate (v5, robust & safe links)
  - **Links only existing files** (no 404s)
 """
 from __future__ import annotations
-import argparse, json, os, shutil, subprocess, sys, time
+import argparse, json, os, shutil, subprocess, sys, time, math
 from pathlib import Path
 from typing import Iterable, Optional, Tuple, List
 import pandas as pd
@@ -21,6 +21,18 @@ DEFAULT_PFAIL_GRID = [0.1, 0.3, 0.5, 0.7, 0.9]
 def _fmt3(x): 
     try: return f"{float(x):.3f}"
     except Exception: return "—"
+
+def _int0(x) -> int:
+    """Safe int cast for counts in HTML; returns 0 for NaN/None/non-numeric."""
+    try:
+        if x is None:
+            return 0
+        v = float(x)
+        if not math.isfinite(v):
+            return 0
+        return int(v)
+    except Exception:
+        return 0
 
 def _read_csv(p: Path, expect: list[str] | None = None) -> Optional[pd.DataFrame]:
     if not p or not p.exists() or p.stat().st_size == 0: return None
@@ -379,9 +391,9 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
             "<tr>"
             f"<td>{r.entrypoint}</td>"
             f"<td>{_fmt3(r.p_fail)}</td>"
-            f"<td>{_fmt3(getattr(r,'typed_mean',float('nan')))} ± {_fmt3(getattr(r,'typed_std',float('nan')))} (n={int(getattr(r,'n_typed',0) or 0)})</td>"
-            f"<td>{_fmt3(getattr(r,'block_mean',float('nan')))} ± {_fmt3(getattr(r,'block_std',float('nan')))} (n={int(getattr(r,'n_block',0) or 0)})</td>"
-            f"<td>{_fmt3(getattr(r,'R_live_mean',float('nan')))} (n={int(getattr(r,'n_live',0) or 0)})</td>"
+            f"<td>{_fmt3(getattr(r,'typed_mean',float('nan')))} ± {_fmt3(getattr(r,'typed_std',float('nan')))} (n={_int0(getattr(r,'n_typed',0))})</td>"
+            f"<td>{_fmt3(getattr(r,'block_mean',float('nan')))} ± {_fmt3(getattr(r,'block_std',float('nan')))} (n={_int0(getattr(r,'n_block',0))})</td>"
+            f"<td>{_fmt3(getattr(r,'R_live_mean',float('nan')))} (n={_int0(getattr(r,'n_live',0))})</td>"
             f"<td>{_fmt3(getattr(r,'MAE_typed_mean',float('nan')))}</td>"
             f"<td>{_fmt3(getattr(r,'MAE_block_mean',float('nan')))}</td>"
             "</tr>"
