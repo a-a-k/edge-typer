@@ -175,6 +175,30 @@ jobs:
             exit 1
           }
 
+          # 4.1) Verify Locust is producing CSVs to the mounted host path BEFORE teardown
+          echo "[locust] Waiting for Locust *_stats.csv to appear under ${RUN_DIR} (depth<=2)…"
+          # Give it a grace period (≤ 60s) to flush files while still running
+          for i in $(seq 1 60); do
+            if find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print -quit 2>/dev/null | grep -q .; then
+              echo "[locust] Found stats CSV(s):"
+              find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print 2>/dev/null | sed 's#^#  #' || true
+              break
+            fi
+            # Periodically show inside-container state to aid debugging
+            if (( i % 5 == 0 )); then
+              echo "[locust] Inspecting container '${LG}' /data contents…"
+              $COMPOSE_CMD $COMPOSE_OPTS exec -T "${LG}" sh -lc 'echo "LOCUST_OPTS=${LOCUST_OPTS}"; ls -lah /data || true' || true
+            fi
+            sleep 1
+          done
+          # If still missing, fail early with context while containers are alive
+          if ! find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print -quit 2>/dev/null | grep -q .; then
+            echo "::error ::Locust did not produce *_stats.csv under ${RUN_DIR}. Live metrics are mandatory." >&2
+            echo "[compose] ps:" && $COMPOSE_CMD $COMPOSE_OPTS ps || true
+            echo "[compose] logs (${LG}):" && $COMPOSE_CMD $COMPOSE_OPTS logs "${LG}" || true
+            exit 1
+          fi
+
           $COMPOSE_CMD $COMPOSE_OPTS down -v || true
         
           # 5) Verify trace JSON and extract to Parquet
@@ -343,32 +367,42 @@ jobs:
           echo "[all-block] lines: $(wc -l < "${RUN_DIR}/availability_block.csv" 2>/dev/null || echo 0)"
           echo "[all-block] head:" && head -n 10 "${RUN_DIR}/availability_block.csv" || true
 
-      - name: Build live availability from Locust CSV (optional)
+      - name: Build live availability from Locust CSV (mandatory)
         run: |
           set -euo pipefail
           echo "[live] Searching for Locust *_stats.csv under ${RUN_DIR} (depth<=2)…"
           find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print 2>/dev/null | sort -r || true
 
-          # Find newest *_stats.csv within RUN_DIR or RUN_DIR/locust
+          # Require newest *_stats.csv within RUN_DIR or RUN_DIR/locust
           STATS=$(find "${RUN_DIR}" -maxdepth 2 -type f -name '*_stats.csv' -print 2>/dev/null | sort -r | head -n1 || true)
-          LIVE_ARGS=()
-          if [[ -n "${STATS}" && -s "${STATS}" ]]; then
-            FAILS="${STATS/_stats.csv/_failures.csv}"
-            echo "[live] Using stats=${STATS} failures=${FAILS}"
-            python scripts/build_live_availability.py \
-              --stats       "${STATS}" \
-              --failures    "${FAILS}" \
-              --typed       "${RUN_DIR}/availability_typed.csv" \
-              --replica     "replicate-${REPL_ID}" \
-              --targets     src/edgetyper/targets.yaml \
-              --entrypoints "${RUN_DIR}/entrypoints.txt" \
-              --out         "${RUN_DIR}/live_availability.csv"
-            echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv" || true
-            LIVE_ARGS=(--live "${RUN_DIR}/live_availability.csv")
-          else
-            echo "::notice ::[live] No Locust *_stats.csv found. Skipping live availability and continuing."
-            ls -lah "${RUN_DIR}/locust" || true
+          if [[ -z "${STATS}" || ! -s "${STATS}" ]]; then
+            echo "::error ::[live] No Locust *_stats.csv found under ${RUN_DIR} (depth<=2). Live step is mandatory." >&2
+            exit 1
           fi
+          FAILS="${STATS/_stats.csv/_failures.csv}"
+          echo "[live] Using stats=${STATS} failures=${FAILS}"
+          python scripts/build_live_availability.py \
+            --stats       "${STATS}" \
+            --failures    "${FAILS}" \
+            --typed       "${RUN_DIR}/availability_typed.csv" \
+            --replica     "replicate-${REPL_ID}" \
+            --targets     src/edgetyper/targets.yaml \
+            --entrypoints "${RUN_DIR}/entrypoints.txt" \
+            --out         "${RUN_DIR}/live_availability.csv"
+
+          # Ensure the file exists and contains data (header + ≥1 row)
+          if [[ ! -s "${RUN_DIR}/live_availability.csv" ]]; then
+            echo "::error ::[live] live_availability.csv was not produced or is empty." >&2
+            exit 1
+          fi
+          LINES=$(wc -l < "${RUN_DIR}/live_availability.csv" || echo 0)
+          if [[ "${LINES}" -le 1 ]]; then
+            echo "::error ::[live] live_availability.csv has no data rows (lines=${LINES})." >&2
+            head -n 10 "${RUN_DIR}/live_availability.csv" || true
+            exit 1
+          fi
+          echo "[live] Sample output:" && head -n 10 "${RUN_DIR}/live_availability.csv"
+          LIVE_ARGS=(--live "${RUN_DIR}/live_availability.csv")
 
           # Always produce availability.json (typed/all-block; include live if present)
           python scripts/export_availability_json.py \
