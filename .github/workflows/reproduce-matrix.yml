@@ -125,32 +125,18 @@ jobs:
             # Be resilient to upstream changes: ensure the load generator has an explicit image
             loadgenerator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
-              command: >
-                locust --skip-log-setup
-                       --headless
-                       --autostart
-                       --run-time 0
-                       --users 35
-                       --spawn-rate 1
-                       --host http://frontend:8080
-                       -f /etc/otel/locustfile.py
-                       --csv /data/locust
-                       --csv-full-history
+              command:
+                - --csv
+                - /data/locust
+                - --csv-full-history
               volumes:
                 - "${RUN_DIR}:/data:rw"
             load-generator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
-              command: >
-                locust --skip-log-setup
-                       --headless
-                       --autostart
-                       --run-time 0
-                       --users 35
-                       --spawn-rate 1
-                       --host http://frontend:8080
-                       -f /etc/otel/locustfile.py
-                       --csv /data/locust
-                       --csv-full-history
+              command:
+                - --csv
+                - /data/locust
+                - --csv-full-history
               volumes:
                 - "${RUN_DIR}:/data:rw"
           YAML
