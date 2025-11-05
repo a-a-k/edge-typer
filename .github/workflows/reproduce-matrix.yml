@@ -128,11 +128,13 @@ jobs:
               entrypoint:
                 - /bin/sh
                 - -lc
-              command: |
-                if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
-                  export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
-                fi
-                exec /docker-entrypoint.sh
+              command:
+                - |
+                  set -e
+                  if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
+                    export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
+                  fi
+                  exec /docker-entrypoint.sh
               volumes:
                 - "${RUN_DIR}:/data:rw"
             load-generator:
@@ -140,11 +142,13 @@ jobs:
               entrypoint:
                 - /bin/sh
                 - -lc
-              command: |
-                if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
-                  export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
-                fi
-                exec /docker-entrypoint.sh
+              command:
+                - |
+                  set -e
+                  if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
+                    export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
+                  fi
+                  exec /docker-entrypoint.sh
               volumes:
                 - "${RUN_DIR}:/data:rw"
           YAML
