@@ -125,18 +125,26 @@ jobs:
             # Be resilient to upstream changes: ensure the load generator has an explicit image
             loadgenerator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
-              environment:
-                - LOCUST_OPTS=--csv /data/locust --csv-full-history
-              command: >
-                /bin/sh -lc 'if ! echo "${LOCUST_OPTS:-}" | grep -q -- "--csv"; then export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
+              entrypoint:
+                - /bin/sh
+                - -lc
+              command: |
+                if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
+                  export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
+                fi
+                exec /docker-entrypoint.sh
               volumes:
                 - "${RUN_DIR}:/data:rw"
             load-generator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
-              environment:
-                - LOCUST_OPTS=--csv /data/locust --csv-full-history
-              command: >
-                /bin/sh -lc 'if ! echo "${LOCUST_OPTS:-}" | grep -q -- "--csv"; then export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"; fi; exec /docker-entrypoint.sh'
+              entrypoint:
+                - /bin/sh
+                - -lc
+              command: |
+                if ! printf '%s' "${LOCUST_OPTS:-}" | grep -q -- '--csv'; then
+                  export LOCUST_OPTS="${LOCUST_OPTS:-} --csv /data/locust --csv-full-history"
+                fi
+                exec /docker-entrypoint.sh
               volumes:
                 - "${RUN_DIR}:/data:rw"
           YAML
