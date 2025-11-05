@@ -173,6 +173,8 @@ def main() -> None:
                 eps_filter = set(ln.strip() for ln in args.entrypoints.read_text(encoding="utf-8").splitlines() if ln.strip())
             except Exception:
                 eps_filter = None
+        if eps_filter is not None and not eps_filter:
+            eps_filter = None
     if args.targets and args.targets.exists():
         import yaml
         try:
