@@ -59,12 +59,29 @@ def _expected_entrypoints() -> List[str]:
     eps: List[str] = []
     if targets.exists():
         try:
-            import yaml  # lazy import so the script still works if PyYAML is missing
-            data = yaml.safe_load(targets.read_text(encoding="utf-8")) or {}
-            eps = sorted(set(str(ep) for ep in (data.get("entrypoints") or {}).keys() if ep))
+            lines = targets.read_text(encoding="utf-8").splitlines()
+            in_block = False
+            for line in lines:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if not in_block:
+                    if stripped == "entrypoints:":
+                        in_block = True
+                    continue
+                if not line.startswith("  "):
+                    break
+                if line.startswith("    "):
+                    continue
+                key = stripped.rstrip(":")
+                if key:
+                    eps.append(key)
         except Exception as exc:
             print(f"::warning ::failed to parse {targets}: {exc}")
+    eps = sorted(set(eps))
     _EXPECTED_CACHE = eps
+    if not eps:
+        print(f"::warning ::no entrypoints discovered in {targets}; allowing all entrypoints.")
     return eps
 
 def _entrypoints_from_df(df: Optional[pd.DataFrame]) -> List[str]:
@@ -248,8 +265,25 @@ def ensure_availability(replica_dir: Path, pgrid: list[float]) -> Tuple[Optional
     block_p = replica_dir / "availability_block.csv"
     _copy_if_nested(replica_dir, "availability_typed.csv")
     _copy_if_nested(replica_dir, "availability_block.csv")
-    if (typed_p.exists() and not _header_only_or_empty(typed_p)) and \
-       (block_p.exists() and not _header_only_or_empty(block_p)):
+    expected = set(_expected_entrypoints())
+
+    def _needs(path: Path) -> bool:
+        if not path.exists() or _header_only_or_empty(path):
+            return True
+        if not expected:
+            return False
+        df = _read_csv(path, ["entrypoint", "p_fail", "R_model"])
+        if df is None or df.empty:
+            return True
+        try:
+            eps = set(df["entrypoint"].dropna().astype(str))
+        except Exception:
+            return True
+        return bool(eps - expected)
+
+    need_t = _needs(typed_p)
+    need_b = _needs(block_p)
+    if not (need_t or need_b):
         return typed_p, block_p
     edges = replica_dir / "edges.parquet"
     pred  = replica_dir / "pred_ours.csv"
@@ -284,19 +318,12 @@ def ensure_availability(replica_dir: Path, pgrid: list[float]) -> Tuple[Optional
     cmd_b = ["edgetyper","resilience","--edges",str(edges),"--pred",str(pred),
              "--entrypoints",str(ep_txt),"--assume-all-blocking","--out",str(block_p)] + pf_args
     try:
-        print(f"[{replica_dir.name}] recomputing typed…"); subprocess.run(cmd_t, check=True)
-        print(f"[{replica_dir.name}] recomputing all-blocking…"); subprocess.run(cmd_b, check=True)
+        if need_t:
+            print(f"[{replica_dir.name}] recomputing typed…"); subprocess.run(cmd_t, check=True)
+        if need_b:
+            print(f"[{replica_dir.name}] recomputing all-blocking…"); subprocess.run(cmd_b, check=True)
     except subprocess.CalledProcessError as e:
         print(f"::warning ::[{replica_dir.name}] resilience failed: {e}")
-    # Log row counts and heads
-    try:
-        for lab, path in (("typed", typed_p), ("all-block", block_p)):
-            if path.exists():
-                txt = path.read_text(encoding="utf-8").splitlines()
-                print(f"[{replica_dir.name}] availability_{lab}.csv lines={len(txt)}")
-                print("\n".join(txt[:10]))
-    except Exception:
-        pass
     # final guard: if still empty, try a last-ditch entrypoint = first node in graph.json (if any)
     if _header_only_or_empty(typed_p) or _header_only_or_empty(block_p):
         g = _find_first(replica_dir, "graph.json")
@@ -321,7 +348,8 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
     grid_env = os.environ.get("P_FAIL_GRID","")
     pgrid = [float(x) for x in grid_env.split()] if grid_env else DEFAULT_PFAIL_GRID
     replica_rows: list[dict] = []
-    (data / "replica_diagnostics").mkdir(parents=True, exist_ok=True)
+    diag_dir = data / "replica_diagnostics"
+    diag_dir.mkdir(parents=True, exist_ok=True)
     expected_set = set(_expected_entrypoints())
     for rdir in replicas:
         rid = rdir.name
@@ -352,7 +380,7 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         }
         diag_src = rdir / "diagnostics.json"
         if diag_src.exists():
-            diag_dst = data / "replica_diagnostics" / f"{rid}.json"
+            diag_dst = diag_dir / f"{rid}.json"
             try:
                 shutil.copyfile(diag_src, diag_dst)
                 row["diagnostics"] = f"data/replica_diagnostics/{rid}.json"
@@ -392,6 +420,7 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         rep_csv = site / "replicas_summary.csv"
         rep_df.to_csv(rep_csv, index=False)
         shutil.copyfile(rep_csv, data / "replicas_summary.csv")
+        (data / "diagnostics_index.json").write_text(json.dumps(replica_rows, indent=2), encoding="utf-8")
     # persist long tables (only if non-empty)
     if not T.empty: T.to_csv(data/"availability_typed_all.csv", index=False)
     if not B.empty: B.to_csv(data/"availability_block_all.csv", index=False)
@@ -446,6 +475,7 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         "<h2>Downloads</h2><ul>"
         + _li("aggregate_summary.json")
         + _li("replicas_summary.csv")
+        + _li("diagnostics_index.json")
         + _li("availability_aggregate.json")
         + _li("availability_aggregate.csv")
         + _li("availability_typed_all.csv")
