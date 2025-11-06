@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Dict
 
@@ -1542,6 +1543,8 @@ def availability_live_cmd(
 
     # ---- aggregation by entrypoint
     acc: dict[str, dict[str, float]] = {}
+    unmatched = Counter()
+    matched_eps: set[str] = set()
     for _, r in dfm.iterrows():
         name = str(r[name_col])
         method = str(r.get(method_col, "")).upper() if method_col else ""
@@ -1557,6 +1560,14 @@ def availability_live_cmd(
         if eps_filter is not None and ep and ep not in eps_filter:
             continue
         if ep is None:
+            total_requests = float(pd.to_numeric(r.get(req_col), errors="coerce") or 0.0)
+            if total_requests > 0:
+                count = int(total_requests)
+                if count <= 0:
+                    count = 1
+                unmatched[name] += count
+            else:
+                unmatched[name] += 1
             continue
         n_total = float(pd.to_numeric(r[req_col], errors="coerce") or 0.0)
         if n_total <= 0:
@@ -1569,6 +1580,7 @@ def availability_live_cmd(
         s["n_5xx"]    += n_5xx
         s["n_timeout"]+= n_to
         s["n_socket"] += n_so
+        matched_eps.add(ep)
 
     rows = []
     for ep, s in acc.items():
@@ -1583,6 +1595,39 @@ def availability_live_cmd(
             "n_timeout": int(s["n_timeout"]),
             "n_socket":  int(s["n_socket"]),
         })
+
+    missing_eps: list[str] = []
+    if eps_filter:
+        missing_eps = sorted(eps_filter - matched_eps)
+        if missing_eps:
+            preview = ", ".join(missing_eps[:5])
+            click.echo(
+                f"[availability-live] warning: {len(missing_eps)} entrypoints from --entrypoints had no matching requests ({preview})",
+                err=True,
+            )
+
+    if not rows:
+        if eps_filter:
+            preview = ", ".join(missing_eps[:5]) if missing_eps else ""
+            raise click.ClickException(
+                "No requests matched the provided --entrypoints filter. "
+                "Ensure the file lists entrypoints emitted by live targets and that mapping rules cover the Locust names."
+                + (f" Missing entrypoints: {preview}" if preview else "")
+            )
+        sample = ", ".join(name for name, _count in unmatched.most_common(5))
+        hint = f" Example unmatched names: {sample}" if sample else ""
+        raise click.ClickException(
+            "No requests matched entrypoint mapping — provide --targets live_targets.yaml with name_regex rules or rely on 'entry:<name>:' prefixes."
+            + hint
+        )
+
+    if unmatched:
+        total_ignored = sum(unmatched.values())
+        preview = ", ".join(f"{name} ({count})" for name, count in unmatched.most_common(3))
+        click.echo(
+            f"[availability-live] warning: ignored {total_ignored} requests with no entrypoint mapping (e.g., {preview})",
+            err=True,
+        )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     df_out = pd.DataFrame(rows)

@@ -68,6 +68,29 @@ def summary_from_metrics(metrics: dict[str, dict | None]) -> dict[str, float | N
     return out
 
 
+def load_predictions(rep_dir: Path) -> pd.DataFrame:
+    """
+    Return the primary typed predictions dataframe if present.
+    Prefers pred_ours.csv but falls back to pred.csv.
+    """
+    candidates = [
+        rep_dir / "pred_ours.csv",
+        rep_dir / "pred.csv",
+    ]
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            df = pd.read_csv(path)
+        except Exception:
+            continue
+        required = {"src_service", "dst_service", "pred_label"}
+        if not required.issubset(set(df.columns)):
+            continue
+        return df.loc[:, ["src_service", "dst_service", "pred_label"]].copy()
+    return pd.DataFrame()
+
+
 def _counts_per_sec(segment: dict[str, Any] | None) -> tuple[dict[str, float], float]:
     if not segment:
         return {}, 0.0
@@ -259,12 +282,47 @@ def main() -> None:
     avail_typed_frames: list[pd.DataFrame] = []
     avail_block_frames: list[pd.DataFrame] = []
     avail_live_frames: list[pd.DataFrame] = []
+    label_async_fracs: list[float] = []
+    label_uncertain_fracs: list[float] = []
+    label_total_edges_sum = 0
+    label_async_edges_sum = 0
+    label_uncertain_edges_sum = 0
+    mae_typed_overall: float | None = None
+    mae_block_overall: float | None = None
+    win_rate_overall: float | None = None
+    mae_typed_rep_vals: list[float] = []
+    mae_block_rep_vals: list[float] = []
+    win_rate_rep_vals: list[float] = []
+    avail_replica_rows: list[dict[str, Any]] = []
 
     replicas_dir: Path = args.replicas_dir
     for rep_dir in sorted(replicas_dir.glob("replicate-*")):
         metrics = load_metrics(rep_dir)
         row: dict[str, Any] = {"replica": rep_dir.name}
         row.update(summary_from_metrics(metrics))
+
+        preds_df = load_predictions(rep_dir)
+        if not preds_df.empty:
+            labels = preds_df["pred_label"].astype(str).str.lower()
+            counts = labels.value_counts()
+            total_labels = int(counts.sum())
+            async_cnt = int(counts.get("async", 0))
+            uncertain_cnt = int(counts.get("uncertain", 0))
+            row["labels_total"] = total_labels
+            row["labels_async_frac"] = async_cnt / total_labels if total_labels else None
+            row["labels_uncertain_frac"] = uncertain_cnt / total_labels if total_labels else None
+            row["labels_async_edges"] = async_cnt
+            row["labels_uncertain_edges"] = uncertain_cnt
+            label_total_edges_sum += total_labels
+            label_async_edges_sum += async_cnt
+            label_uncertain_edges_sum += uncertain_cnt
+            if total_labels:
+                label_async_fracs.append(async_cnt / total_labels)
+                label_uncertain_fracs.append(uncertain_cnt / total_labels)
+        else:
+            row["labels_total"] = None
+            row["labels_async_frac"] = None
+            row["labels_uncertain_frac"] = None
 
         typed_scores, block_scores = load_plans(rep_dir)
         av_t, av_b = load_availability(rep_dir)
@@ -366,25 +424,26 @@ def main() -> None:
                 f"<tbody>{rows_av}</tbody></table>"
             )
     except Exception:
+        pass
 
-        agg: dict[str, Any] = {
-            "n_replicas": int(len(df)),
-            "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_") and not df[c].dropna().empty},
-            "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_") and not df[c].dropna().empty},
-            "spearman_mean_typed": float(pd.Series(spearman_typed_vals).mean()) if spearman_typed_vals else None,
-            "spearman_mean_block": float(pd.Series(spearman_block_vals).mean()) if spearman_block_vals else None,
-            "kendall_mean_typed": float(pd.Series(kendall_typed_vals).mean()) if kendall_typed_vals else None,
-            "kendall_mean_block": float(pd.Series(kendall_block_vals).mean()) if kendall_block_vals else None,
-            "spearman_winrate": win_rate(spearman_pairs),
-            "kendall_winrate": win_rate(kendall_pairs),
-            "p_at_3_mean_typed": float(pd.Series(p3_typed_vals).mean()) if p3_typed_vals else None,
-            "p_at_3_mean_block": float(pd.Series(p3_block_vals).mean()) if p3_block_vals else None,
-            "p_at_5_mean_typed": float(pd.Series(p5_typed_vals).mean()) if p5_typed_vals else None,
-            "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
-        }
+    agg: dict[str, Any] = {
+        "n_replicas": int(len(df)),
+        "macroF1_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("macroF1_") and not df[c].dropna().empty},
+        "uncertain_means": {c: float(df[c].dropna().mean()) for c in df.columns if c.startswith("n_uncertain_") and not df[c].dropna().empty},
+        "spearman_mean_typed": float(pd.Series(spearman_typed_vals).mean()) if spearman_typed_vals else None,
+        "spearman_mean_block": float(pd.Series(spearman_block_vals).mean()) if spearman_block_vals else None,
+        "kendall_mean_typed": float(pd.Series(kendall_typed_vals).mean()) if kendall_typed_vals else None,
+        "kendall_mean_block": float(pd.Series(kendall_block_vals).mean()) if kendall_block_vals else None,
+        "spearman_winrate": win_rate(spearman_pairs),
+        "kendall_winrate": win_rate(kendall_pairs),
+        "p_at_3_mean_typed": float(pd.Series(p3_typed_vals).mean()) if p3_typed_vals else None,
+        "p_at_3_mean_block": float(pd.Series(p3_block_vals).mean()) if p3_block_vals else None,
+        "p_at_5_mean_typed": float(pd.Series(p5_typed_vals).mean()) if p5_typed_vals else None,
+        "p_at_5_mean_block": float(pd.Series(p5_block_vals).mean()) if p5_block_vals else None,
+    }
 
     # ---- Model (typed/block) vs live ----
-    downloads_extra = ""
+    download_links: list[str] = []
     live_join_html = ""
     try:
         if avail_live_frames and avail_typed_frames and avail_block_frames:
@@ -412,9 +471,31 @@ def main() -> None:
                 overall_mae_b = float(J["err_block"].mean())
                 winrate = float(((J["err_typed"] < J["err_block"]).astype(float)
                                  + 0.5*(J["err_typed"] == J["err_block"]).astype(float)).mean())
-                pd.DataFrame([{"MAE_typed": overall_mae_t,
-                               "MAE_block": overall_mae_b,
-                               "win_rate_typed": winrate}]).to_csv(data_dir / "availability_errors_overall.csv", index=False)
+                mae_typed_overall = overall_mae_t
+                mae_block_overall = overall_mae_b
+                win_rate_overall = winrate
+
+                rep_rows: list[dict[str, Any]] = []
+                for rep_name, grp in J.groupby("replica"):
+                    if grp.empty:
+                        continue
+                    mae_t_rep = float(grp["err_typed"].mean())
+                    mae_b_rep = float(grp["err_block"].mean())
+                    win_rep = float(((grp["err_typed"] < grp["err_block"]).astype(float)
+                                     + 0.5*(grp["err_typed"] == grp["err_block"]).astype(float)).mean())
+                    rep_rows.append({
+                        "replica": rep_name,
+                        "MAE_typed": mae_t_rep,
+                        "MAE_block": mae_b_rep,
+                        "win_rate_typed": win_rep,
+                        "n_cells": int(len(grp)),
+                    })
+                    mae_typed_rep_vals.append(mae_t_rep)
+                    mae_block_rep_vals.append(mae_b_rep)
+                    win_rate_rep_vals.append(win_rep)
+                if rep_rows:
+                    avail_replica_rows.extend(rep_rows)
+                    pd.DataFrame(rep_rows).to_csv(data_dir / "availability_errors_by_replica.csv", index=False)
 
                 rows = "".join(
                     f"<tr><td>{float(r.p_fail):.1f}</td>"
@@ -428,18 +509,22 @@ def main() -> None:
                                   "<table><thead><tr><th>p_fail</th><th>Live</th><th>Typed</th>"
                                   "<th>All-blocking</th><th>MAE typed</th><th>MAE all-block</th><th>ΔMAE</th>"
                                   "</tr></thead><tbody>" + rows + "</tbody></table>")
-                downloads_extra = (
-                    '<li><a href="data/availability_join_pooled.csv" download>availability_join_pooled.csv</a></li>'
-                    '<li><a href="data/availability_errors_by_p.csv" download>availability_errors_by_p.csv</a></li>'
-                    '<li><a href="data/availability_errors_overall.csv" download>availability_errors_overall.csv</a></li>'
-                )
+                pd.DataFrame([{"MAE_typed": overall_mae_t,
+                               "MAE_block": overall_mae_b,
+                               "win_rate_typed": winrate}]).to_csv(data_dir / "availability_errors_overall.csv", index=False)
+
+                download_links.extend([
+                    '<li><a href="data/availability_join_pooled.csv" download>availability_join_pooled.csv</a></li>',
+                    '<li><a href="data/availability_errors_by_p.csv" download>availability_errors_by_p.csv</a></li>',
+                    '<li><a href="data/availability_errors_overall.csv" download>availability_errors_overall.csv</a></li>',
+                ])
+                if avail_replica_rows:
+                    download_links.append('<li><a href="data/availability_errors_by_replica.csv" download>availability_errors_by_replica.csv</a></li>')
     except Exception:
         pass
 
-    # Ensure 'agg' exists even if an earlier step failed before its construction.
-    # This prevents UnboundLocalError when writing *_ci95 fields.
-    if 'agg' not in locals():
-        agg = {"n_replicas": int(len(df)) if 'df' in locals() else 0}
+    downloads_extra = "".join(download_links)
+
     for key, vec in [
         ("spearman_typed", spearman_typed_vals),
         ("spearman_block", spearman_block_vals),
@@ -453,12 +538,86 @@ def main() -> None:
         lo, hi = bootstrap_ci(vec)
         agg[f"{key}_ci95"] = [lo, hi] if lo is not None and hi is not None else None
 
+    agg["labels_async_frac_weighted"] = (label_async_edges_sum / label_total_edges_sum) if label_total_edges_sum else None
+    agg["labels_uncertain_frac_weighted"] = (label_uncertain_edges_sum / label_total_edges_sum) if label_total_edges_sum else None
+    agg["labels_async_frac_mean"] = float(mean(label_async_fracs)) if label_async_fracs else None
+    agg["labels_uncertain_frac_mean"] = float(mean(label_uncertain_fracs)) if label_uncertain_fracs else None
+    for name, vec in [("labels_async_frac", label_async_fracs), ("labels_uncertain_frac", label_uncertain_fracs)]:
+        lo, hi = bootstrap_ci(vec)
+        agg[f"{name}_ci95"] = [lo, hi] if lo is not None and hi is not None else None
+
+    agg["mae_typed_overall"] = mae_typed_overall
+    agg["mae_block_overall"] = mae_block_overall
+    agg["win_rate_typed_overall"] = win_rate_overall
+    for key, vec in [
+        ("mae_typed", mae_typed_rep_vals),
+        ("mae_block", mae_block_rep_vals),
+        ("win_rate_typed", win_rate_rep_vals),
+    ]:
+        lo, hi = bootstrap_ci(vec)
+        agg[f"{key}_ci95"] = [lo, hi] if lo is not None and hi is not None else None
+
     (data_dir / "aggregate_summary.json").write_text(json.dumps(agg, indent=2))
 
     def fmt(val: float | None) -> str:
         return "n/a" if val is None else f"{val:.3f}"
 
+    def fmt_pct(val: float | None) -> str:
+        return "n/a" if val is None else f"{val * 100:.1f}%"
+
+    def fmt_ci(ci: Any, *, pct: bool = False) -> str:
+        if not ci:
+            return "n/a"
+        lo, hi = ci
+        if lo is None or hi is None:
+            return "n/a"
+        if pct:
+            return f"[{lo * 100:.1f}%, {hi * 100:.1f}%]"
+        return f"[{lo:.3f}, {hi:.3f}]"
+
     agg.setdefault("macroF1_means", {})
+
+    label_rows: list[str] = []
+    if agg.get("labels_async_frac_weighted") is not None or agg.get("labels_async_frac_mean") is not None:
+        label_rows.append(
+            "<tr><td>Async</td>"
+            f"<td>{fmt_pct(agg.get('labels_async_frac_weighted'))}</td>"
+            f"<td>{fmt_pct(agg.get('labels_async_frac_mean'))}</td>"
+            f"<td>{fmt_ci(agg.get('labels_async_frac_ci95'), pct=True)}</td></tr>"
+        )
+    if agg.get("labels_uncertain_frac_weighted") is not None or agg.get("labels_uncertain_frac_mean") is not None:
+        label_rows.append(
+            "<tr><td>Uncertain</td>"
+            f"<td>{fmt_pct(agg.get('labels_uncertain_frac_weighted'))}</td>"
+            f"<td>{fmt_pct(agg.get('labels_uncertain_frac_mean'))}</td>"
+            f"<td>{fmt_ci(agg.get('labels_uncertain_frac_ci95'), pct=True)}</td></tr>"
+        )
+    label_html = ""
+    if label_rows:
+        label_html = (
+            "<h2>Label coverage</h2>"
+            "<table><thead><tr><th>Label</th><th>Weighted share</th><th>Replica mean</th><th>95% CI</th></tr></thead>"
+            f"<tbody>{''.join(label_rows)}</tbody></table>"
+        )
+
+    live_summary_html = ""
+    if agg.get("mae_typed_overall") is not None or agg.get("win_rate_typed_overall") is not None:
+        mae_delta = None
+        if agg.get("mae_typed_overall") is not None and agg.get("mae_block_overall") is not None:
+            mae_delta = agg["mae_block_overall"] - agg["mae_typed_overall"]
+        live_summary_html = (
+            "<h2>Availability error (overall)</h2>"
+            "<table><thead><tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Δ (block - typed)</th></tr></thead><tbody>"
+            f"<tr><td>MAE</td><td>{fmt(agg.get('mae_typed_overall'))}</td>"
+            f"<td>{fmt(agg.get('mae_block_overall'))}</td><td>{fmt(mae_delta)}</td></tr>"
+            f"<tr><td>Win rate (typed closer)</td><td>{fmt_pct(agg.get('win_rate_typed_overall'))}</td>"
+            "<td>&mdash;</td><td>&mdash;</td></tr>"
+            "</tbody></table>"
+            f"<p>95% CIs (bootstrap by replica): "
+            f"MAE_typed={fmt_ci(agg.get('mae_typed_ci95'))}, "
+            f"MAE_block={fmt_ci(agg.get('mae_block_ci95'))}, "
+            f"win_rate_typed={fmt_ci(agg.get('win_rate_typed_ci95'), pct=True)}</p>"
+        )
 
     # --- availability-only mode: build a minimal page and exit early ---
     if os.getenv("AVAIL_ONLY", "0") == "1":
@@ -468,7 +627,9 @@ def main() -> None:
             "<style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px}"
             "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>"
             f"<h1>EdgeTyper — Aggregate (n={agg['n_replicas']}, soak=1800s)</h1>"
+            f"{label_html}"
             f"{avail_table_html}"
+            f"{live_summary_html}"
             f"{live_join_html}"
             "<h2>Downloads</h2><ul>"
             "<li><a href='data/aggregate_summary.json' download>aggregate_summary.json</a></li>"
@@ -491,6 +652,7 @@ def main() -> None:
   <li>Ours — SemConv dropped: {fmt(agg['macroF1_means'].get('macroF1_ours_semconv_drop'))}</li>
   <li>Ours — Timing dropped: {fmt(agg['macroF1_means'].get('macroF1_ours_timing_drop'))}</li>
 </ul>
+{label_html}
 <h2>Prediction vs live (pooled)</h2>
 <table>
   <tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Win rate (typed &gt; block)</th></tr>
@@ -508,6 +670,7 @@ def main() -> None:
 <p>95% CIs: P@3_typed={agg.get('p_at_3_typed_ci95')}, P@3_block={agg.get('p_at_3_block_ci95')}<br>
 P@5_typed={agg.get('p_at_5_typed_ci95')}, P@5_block={agg.get('p_at_5_block_ci95')}</p>
 {avail_table_html}
+{live_summary_html}
 {live_join_html}
 <h2>Downloads</h2>
 <ul>

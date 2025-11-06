@@ -168,6 +168,8 @@ entrypoints:
     - name_regex: "^/payments"
 ```
 
+> **Note.** `src/edgetyper/targets.yaml` ships with a catch‑all mapping for the OpenTelemetry Demo. The CLI now warns when Locust requests fail to match your entrypoint rules (and errors if nothing matches), so you can adjust the YAML/filters before aggregating.
+
 **What the command computes:** for each mapped entrypoint, it sums `#Requests` and categorizes failures from `_failures.csv` into **5xx**, **timeout**, **socket**. It writes one row per `(entrypoint, p_fail)` with:
 
 ```
@@ -184,6 +186,7 @@ Use the Python script (not the `report` command) to build a **lightweight availa
 
 * **Availability‑only** (recommended while validating live): set `AVAIL_ONLY=1`.
   The page shows **pooled Monte‑Carlo availability** (typed vs all‑blocking). If each `replicate-*` directory also contains `live_availability.csv`, the page additionally shows **“Availability: model vs live (pooled)”** with MAE by `p_fail`, overall MAE, and **win‑rate** (share of cells where typed is closer to live).
+  The aggregator also surfaces **label coverage (async vs uncertain)** and bootstrap **95% CIs** for the model‑vs‑live comparison (MAE and win rate).
 
 ```bash
 # Aggregate N replica folders (replicate-1/, replicate-2/, …) into `site/`
@@ -196,7 +199,8 @@ Outputs under `site/`:
 
 * `index.html`, plus CSVs in `site/data/`:
   `availability_typed_pooled.csv`, `availability_block_pooled.csv`,
-  if live present: `availability_join_pooled.csv`, `availability_errors_by_p.csv`, `availability_errors_overall.csv`.
+  if live present: `availability_join_pooled.csv`, `availability_errors_by_p.csv`,
+  `availability_errors_overall.csv`, `availability_errors_by_replica.csv`.
 
 ---
 
