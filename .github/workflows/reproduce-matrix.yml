@@ -354,6 +354,44 @@ jobs:
           echo "[all-block] lines: $(wc -l < "${RUN_DIR}/availability_block.csv" 2>/dev/null || echo 0)"
           echo "[all-block] head:" && head -n 10 "${RUN_DIR}/availability_block.csv" || true
 
+      - name: Extended verification (labels & availability sanity)
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import pandas as pd
+
+          run = Path(os.environ["RUN_DIR"])
+          expected_entrypoints = {"load-generator"}
+
+          eps_txt = run / "entrypoints.txt"
+          eps = {ln.strip() for ln in eps_txt.read_text(encoding="utf-8").splitlines() if ln.strip()}
+          if not eps:
+              raise SystemExit("entrypoints.txt is empty after generation.")
+          if not eps.issubset(expected_entrypoints):
+              raise SystemExit(f"Unexpected entrypoints {sorted(eps)}; expected subset of {sorted(expected_entrypoints)}.")
+
+          preds = pd.read_csv(run / "pred_ours.csv")
+          counts = preds["pred_label"].value_counts()
+          async_count = int(counts.get("async", 0))
+          sync_count = int(counts.get("sync", 0))
+          uncertain_count = int(counts.get("uncertain", 0))
+          print(f"[verify] label counts → async={async_count} sync={sync_count} uncertain={uncertain_count}")
+          if async_count == 0:
+              raise SystemExit("No async edges predicted — typed graph collapses to all-blocking.")
+
+          typed = pd.read_csv(run / "availability_typed.csv")
+          block = pd.read_csv(run / "availability_block.csv")
+          merged = typed.merge(block, on=["entrypoint", "p_fail"], suffixes=("_typed", "_block"))
+          if merged.empty:
+              raise SystemExit("Availability CSVs merged to zero rows; check entrypoints/p_fail grid.")
+          merged["diff"] = (merged["R_model_typed"] - merged["R_model_block"]).abs()
+          max_diff = float(merged["diff"].max())
+          print(f"[verify] max |typed - all-block| = {max_diff:.6f}")
+          if max_diff < 1e-6:
+              raise SystemExit("Typed availability matches all-block exactly; investigate classifier/graph input.")
+          PY
+
       - name: Build live availability from Locust CSV (mandatory)
         run: |
           set -euo pipefail
