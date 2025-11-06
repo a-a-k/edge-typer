@@ -1,11 +1,11 @@
 # Request-name → entrypoint mapping used by `edgetyper availability-live`.
 # Rules are evaluated top-to-bottom; the first match wins.
 # This variant is tuned for the OpenTelemetry Demo load generator.
-# We aggregate all HTTP request names into the **frontend-proxy** service so that
-# live availability lines up with the resilience model entrypoint (which is a node
-# in the service graph, unlike the external "load-generator" process).
+# We aggregate all HTTP request names into the load-generator entrypoint so that
+# live availability aligns with the resilience model (which treats the client as
+# the entrypoint into the system).
 entrypoints:
-  frontend-proxy:
+  load-generator:
     # Match every Locust request (Name/Request column) and attribute it to the
-    # frontend-proxy service entrypoint.
+    # load-generator entrypoint.
     - name_regex: ".*"
