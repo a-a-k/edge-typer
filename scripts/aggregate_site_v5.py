@@ -13,9 +13,12 @@ from __future__ import annotations
 import argparse, json, os, shutil, subprocess, sys, time, math
 from pathlib import Path
 from typing import Iterable, Optional, Tuple, List
+
 import pandas as pd
+import yaml
 
 DEFAULT_PFAIL_GRID = [0.1, 0.3, 0.5, 0.7, 0.9]
+_EXPECTED_CACHE: Optional[List[str]] = None
 
 # ------------------- small utils -------------------
 def _fmt3(x): 
@@ -48,6 +51,29 @@ def _write_lines(path: Path, lines: Iterable[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         for ln in lines: f.write(f"{ln}\n")
+
+def _expected_entrypoints() -> List[str]:
+    global _EXPECTED_CACHE
+    if _EXPECTED_CACHE is not None:
+        return _EXPECTED_CACHE
+    targets = Path("src/edgetyper/targets.yaml")
+    eps: List[str] = []
+    if targets.exists():
+        try:
+            data = yaml.safe_load(targets.read_text(encoding="utf-8")) or {}
+            eps = sorted(set(str(ep) for ep in (data.get("entrypoints") or {}).keys() if ep))
+        except Exception as exc:
+            print(f"::warning ::failed to parse {targets}: {exc}")
+    _EXPECTED_CACHE = eps
+    return eps
+
+def _entrypoints_from_df(df: Optional[pd.DataFrame]) -> List[str]:
+    if df is None or df.empty or "entrypoint" not in df.columns:
+        return []
+    try:
+        return sorted(set(df["entrypoint"].dropna().astype(str)))
+    except Exception:
+        return []
 
 def _ensure_pkg() -> None:
     """Ensure edgetyper CLI & pyarrow are present."""
@@ -180,6 +206,10 @@ def _entrypoints_from_nodes_txt(p: Path) -> list[str]:
 
 def ensure_entrypoints(replica_dir: Path) -> Path:
     txt = replica_dir / "entrypoints.txt"
+    expected = _expected_entrypoints()
+    if expected:
+        _write_lines(txt, expected)
+        return txt
     if not txt.exists():
         src = _find_first(replica_dir, "entrypoints.txt")
         if src: shutil.copyfile(src, txt)
@@ -290,6 +320,9 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
     typed_all, block_all, live_all = [], [], []
     grid_env = os.environ.get("P_FAIL_GRID","")
     pgrid = [float(x) for x in grid_env.split()] if grid_env else DEFAULT_PFAIL_GRID
+    replica_rows: list[dict] = []
+    (data / "replica_diagnostics").mkdir(parents=True, exist_ok=True)
+    expected_set = set(_expected_entrypoints())
     for rdir in replicas:
         rid = rdir.name
         # ensure top-level files exist or copy nested ones up
@@ -308,6 +341,24 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         t = _read_csv(tpath, ["entrypoint","p_fail","R_model"])
         b = _read_csv(bpath, ["entrypoint","p_fail","R_model"])
         l = _read_csv(lpath,  ["entrypoint","p_fail","R_live"])
+        row = {
+            "replica": rid,
+            "typed_rows": 0 if t is None else int(len(t)),
+            "block_rows": 0 if b is None else int(len(b)),
+            "live_rows": 0 if l is None else int(len(l)),
+            "typed_entrypoints": "|".join(_entrypoints_from_df(t)),
+            "block_entrypoints": "|".join(_entrypoints_from_df(b)),
+            "live_entrypoints": "|".join(_entrypoints_from_df(l)),
+        }
+        diag_src = rdir / "diagnostics.json"
+        if diag_src.exists():
+            diag_dst = data / "replica_diagnostics" / f"{rid}.json"
+            try:
+                shutil.copyfile(diag_src, diag_dst)
+                row["diagnostics"] = f"data/replica_diagnostics/{rid}.json"
+            except Exception as exc:
+                row["diagnostics_error"] = str(exc)
+        replica_rows.append(row)
         if t is not None and not t.empty: typed_all.append(t.assign(replica=rid))
         if b is not None and not b.empty: block_all.append(b.assign(replica=rid))
         if l is not None and not l.empty: live_all.append(l.assign(replica=rid))
@@ -323,6 +374,24 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
         L["entrypoint"]=L["entrypoint"].astype(str)
         L["p_fail"]=pd.to_numeric(L["p_fail"], errors="coerce")
         L["R_live"]=pd.to_numeric(L["R_live"], errors="coerce")
+    if expected_set:
+        for label, df in (("typed", T), ("all-block", B), ("live", L)):
+            if df.empty: 
+                continue
+            extras = sorted(set(df["entrypoint"].dropna()) - expected_set)
+            if extras:
+                print(f"::warning ::aggregate: unexpected entrypoints in {label}: {extras}")
+        if not T.empty:
+            T = T[T["entrypoint"].isin(expected_set)]
+        if not B.empty:
+            B = B[B["entrypoint"].isin(expected_set)]
+        if not L.empty:
+            L = L[L["entrypoint"].isin(expected_set)]
+    if replica_rows:
+        rep_df = pd.DataFrame(replica_rows).sort_values("replica")
+        rep_csv = site / "replicas_summary.csv"
+        rep_df.to_csv(rep_csv, index=False)
+        shutil.copyfile(rep_csv, data / "replicas_summary.csv")
     # persist long tables (only if non-empty)
     if not T.empty: T.to_csv(data/"availability_typed_all.csv", index=False)
     if not B.empty: B.to_csv(data/"availability_block_all.csv", index=False)

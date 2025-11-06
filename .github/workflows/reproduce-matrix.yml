@@ -233,30 +233,17 @@ jobs:
             --out "${RUN_DIR}/graph.json"
 
           # Freeze entrypoints for model/live parity
-          # Prefer helper script; fall back to tiny inline Python if the script is absent.
-          if [[ -f scripts/targets_to_entrypoints.py ]]; then
-            python scripts/targets_to_entrypoints.py \
-              --targets src/edgetyper/targets.yaml \
-              --out "${RUN_DIR}/entrypoints.csv"
-          else
-            python -c "import yaml, pathlib; cfg=yaml.safe_load(open('src/edgetyper/targets.yaml')); eps=list((cfg.get('entrypoints') or {}).keys()); pathlib.Path(r'${RUN_DIR}/entrypoints.csv').write_text('entrypoint\n' + '\n'.join(eps) + '\n')"
-          fi
-          echo "[entrypoints]" && cat "${RUN_DIR}/entrypoints.csv"
-          # --- NEW: create the newline-delimited file resilience expects ---
-          python - <<'PY'
-          import os, pandas as pd, pathlib
-          run = os.environ["RUN_DIR"]
-          p_csv = f"{run}/entrypoints.csv"
-          try:
-              df = pd.read_csv(p_csv)
-              col = "entrypoint" if "entrypoint" in df.columns else df.columns[0]
-              vals = [str(x) for x in df[col].dropna().astype(str).tolist()]
-          except Exception:
-              vals = []
-          pathlib.Path(f"{run}/entrypoints.txt").write_text(("\n".join(vals) + ("\n" if vals else "")))
-          print("[entrypoints.txt]", vals)
-          PY
+          python scripts/targets_to_entrypoints.py \
+            --targets src/edgetyper/targets.yaml \
+            --out "${RUN_DIR}/entrypoints.csv" \
+            --txt "${RUN_DIR}/entrypoints.txt" \
+            --fail-empty
+          echo "[entrypoints.csv]" && cat "${RUN_DIR}/entrypoints.csv"
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
+          if [[ ! -s "${RUN_DIR}/entrypoints.txt" ]]; then
+            echo "::error ::entrypoints.txt is missing or empty after generation" >&2
+            exit 1
+          fi
 
           # Audit: compare entrypoints vs edges.parquet services (first 5 present/missing)
           python - <<'PY'
@@ -410,6 +397,42 @@ jobs:
             --blocking "${RUN_DIR}/availability_block.csv" \
             "${LIVE_ARGS[@]}" \
             --out     "${RUN_DIR}/availability.json"
+
+      - name: Snapshot diagnostics
+        run: |
+          python - <<'PY'
+          import json, os, pandas as pd
+          from pathlib import Path
+
+          run = Path(os.environ["RUN_DIR"])
+          diag = {
+              "entrypoints": (run / "entrypoints.txt").read_text(encoding="utf-8").split(),
+              "availability": {},
+          }
+          for label, fname in (
+              ("typed", "availability_typed.csv"),
+              ("all_block", "availability_block.csv"),
+              ("live", "live_availability.csv"),
+          ):
+              path = run / fname
+              if path.exists() and path.stat().st_size:
+                  try:
+                      df = pd.read_csv(path)
+                      diag["availability"][label] = {
+                          "path": str(path),
+                          "rows": int(len(df)),
+                          "entrypoints": sorted(set(df["entrypoint"].dropna().astype(str))) if "entrypoint" in df.columns else [],
+                      }
+                  except Exception as exc:
+                      diag["availability"][label] = {"path": str(path), "error": str(exc)}
+              else:
+                  diag["availability"][label] = {"path": str(path), "missing": True}
+          stats = run / "locust_stats.csv"
+          if stats.exists():
+              diag["locust_stats"] = {"path": str(stats), "lines": sum(1 for _ in stats.open())}
+          (run / "diagnostics.json").write_text(json.dumps(diag, indent=2), encoding="utf-8")
+          print(json.dumps(diag, indent=2))
+          PY
 
       - name: Upload replica artifact
         uses: actions/upload-artifact@v4
