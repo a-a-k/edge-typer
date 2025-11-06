@@ -379,13 +379,13 @@ def build_aggregate(replicas: list[Path], site: Path) -> None:
             "live_entrypoints": "|".join(_entrypoints_from_df(l)),
         }
         diag_src = rdir / "diagnostics.json"
+        diag_dst = diag_dir / f"{rid}.json"
         if diag_src.exists():
-            diag_dst = diag_dir / f"{rid}.json"
             try:
                 shutil.copyfile(diag_src, diag_dst)
-                row["diagnostics"] = f"data/replica_diagnostics/{rid}.json"
             except Exception as exc:
-                row["diagnostics_error"] = str(exc)
+                print(f"::warning ::[{rid}] failed to copy diagnostics.json: {exc}")
+        row["diagnostics"] = f"data/replica_diagnostics/{rid}.json"
         replica_rows.append(row)
         if t is not None and not t.empty: typed_all.append(t.assign(replica=rid))
         if b is not None and not b.empty: block_all.append(b.assign(replica=rid))
