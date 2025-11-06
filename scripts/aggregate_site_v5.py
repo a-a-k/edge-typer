@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Iterable, Optional, Tuple, List
 
 import pandas as pd
-import yaml
 
 DEFAULT_PFAIL_GRID = [0.1, 0.3, 0.5, 0.7, 0.9]
 _EXPECTED_CACHE: Optional[List[str]] = None
@@ -60,6 +59,7 @@ def _expected_entrypoints() -> List[str]:
     eps: List[str] = []
     if targets.exists():
         try:
+            import yaml  # lazy import so the script still works if PyYAML is missing
             data = yaml.safe_load(targets.read_text(encoding="utf-8")) or {}
             eps = sorted(set(str(ep) for ep in (data.get("entrypoints") or {}).keys() if ep))
         except Exception as exc:
