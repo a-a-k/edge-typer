@@ -1271,10 +1271,15 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
     required=False,
     help="Destination YAML mapping entrypoint→exact Locust Name regex.",
 )
+@click.option(
+    "--min-requests", type=float, default=1.0, show_default=True,
+    help="Minimum total Locust requests per Name required to keep an entrypoint.",
+)
 def entrypoints_from_locust_cmd(
     locust_prefix: Path,
     out_entrypoints: Path | None,
     out_targets: Path | None,
+    min_requests: float,
 ) -> None:
     """Derive entrypoints directly from Locust stats, ensuring model/live parity."""
     if out_entrypoints is None and out_targets is None:
@@ -1305,26 +1310,53 @@ def entrypoints_from_locust_cmd(
     if stats.empty or len(stats.columns) == 0:
         raise click.ClickException(f"No data in {stats_path}")
 
-    col_map = {c.lower().strip().replace(" ", "").replace("_", ""): c for c in stats.columns}
+    def _norm_col(name: str) -> str:
+        return name.lower().replace(" ", "").replace("_", "").replace("#", "")
+
+    col_map = {_norm_col(c): c for c in stats.columns}
     name_col = col_map.get("name", "Name")
     if name_col not in stats.columns:
         raise click.ClickException(f"'Name' column not found in {stats_path}")
+
+    req_col = None
+    for key in ("requests", "requestcount", "#requests", "count"):
+        col = col_map.get(_norm_col(key))
+        if col:
+            req_col = col
+            break
 
     df = stats.copy()
     df[name_col] = df[name_col].astype(str)
     df = df[~df[name_col].str.contains("Aggregated|Total", case=False, na=False)]
 
+    totals_map: dict[str, float] = {}
+    if req_col and req_col in df.columns:
+        df["_req"] = pd.to_numeric(df[req_col], errors="coerce").fillna(0.0)
+        totals_map = df.groupby(name_col)["_req"].sum().to_dict()
+
     names: list[str] = []
+    skipped_low: list[str] = []
     seen = set()
     for raw in df[name_col].tolist():
         name = str(raw).strip()
         if not name or name in seen:
             continue
         seen.add(name)
+        if min_requests > 0 and totals_map:
+            if float(totals_map.get(name, 0.0)) < float(min_requests):
+                skipped_low.append(name)
+                continue
         names.append(name)
 
     if not names:
         raise click.ClickException("No Locust request names found after filtering totals.")
+    if skipped_low:
+        preview = ", ".join(skipped_low[:5])
+        click.echo(
+            f"[entrypoints-from-locust] skipped {len(skipped_low)} names with < {min_requests} requests "
+            f"(examples: {preview})",
+            err=True,
+        )
 
     taken_ids: set[str] = set()
     entries = [
