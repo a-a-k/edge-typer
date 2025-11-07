@@ -627,7 +627,8 @@ def main() -> None:
                 "<p>Live availability was not captured for these replicas, so MAE/win-rate were not computed.</p>"
                 if not has_live_data else
                 "<p>Live datasets were available but the summary table could not be produced. "
-                "Check <code>data/availability_errors_overall.csv</code>.</p>"
+                "Download <a href='data/availability_errors_overall.csv' download>data/availability_errors_overall.csv</a> "
+                "for the raw MAE rows.</p>"
             )
         )
 
@@ -638,7 +639,8 @@ def main() -> None:
                 "<p>Skipped because no live availability measurements were provided.</p>"
                 if not has_live_data else
                 "<p>Live measurements exist, but the pooled table could not be rendered. "
-                "Download <code>data/availability_join_pooled.csv</code> for raw values.</p>"
+                "Download <a href='data/availability_join_pooled.csv' download>data/availability_join_pooled.csv</a> "
+                "for the raw cell-by-cell errors.</p>"
             )
         )
 
@@ -673,7 +675,9 @@ def main() -> None:
         interpretation_html = (
             "<h2>Interpretation</h2>"
             "<p>Live availability was present but some post-processing failed. "
-            "Refer to the CSV downloads for raw metrics.</p>"
+            "Download <a href='data/availability_errors_overall.csv' download>availability_errors_overall.csv</a> "
+            "and <a href='data/availability_join_pooled.csv' download>availability_join_pooled.csv</a> "
+            "for raw metrics.</p>"
         )
 
     # --- availability-only mode: build a minimal page and exit early ---
