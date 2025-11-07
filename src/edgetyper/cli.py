@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections import Counter
 from pathlib import Path
 from typing import Dict
 
@@ -1599,6 +1598,9 @@ def observe_cmd(spans_path: Path, segments_path: Path, out_path: Path) -> None:
 
 
 # ---------------- availability-live (build live_availability.csv from Locust CSV) ----------------
+from edgetyper.live import compute_live_availability
+
+
 @main.command("availability-live")
 @click.option(
     "--locust-prefix", "locust_prefix",
@@ -1631,148 +1633,21 @@ def availability_live_cmd(
     fails_path = base.with_name(base.name + "_failures.csv")
     if not stats_path.exists():
         raise click.ClickException(f"Locust stats file not found: {stats_path}")
+    fails_opt = fails_path if fails_path.exists() else None
+    df_rows, missing_eps, unmatched = compute_live_availability(
+        stats_path, fails_opt, targets_yaml, eps_path
+    )
 
-    stats = pd.read_csv(stats_path)
-    cols = {c.lower().strip().replace(" ", "").replace("_", ""): c for c in stats.columns}
-    name_col = cols.get("name", "Name")
-    method_col = cols.get("method", None)
-    req_col = cols.get("requests", None) or cols.get("requestcount", None) or cols.get("#requests", None)
-    if req_col is None:
-        num_cols = [c for c in stats.columns if pd.api.types.is_numeric_dtype(stats[c])]
-        req_col = num_cols[0] if num_cols else "Requests"
-    df_stats = stats.copy()
-    df_stats[name_col] = df_stats[name_col].astype(str)
-    df_stats = df_stats[~df_stats[name_col].str.contains("Aggregated|Total", case=False, na=False)]
+    if missing_eps:
+        preview = ", ".join(missing_eps[:5])
+        click.echo(
+            f"[availability-live] warning: {len(missing_eps)} entrypoints from --entrypoints had no matching requests ({preview})",
+            err=True,
+        )
 
-    # ---- failures.csv
-    if fails_path.exists():
-        fails = pd.read_csv(fails_path)
-        fcols = {c.lower().strip().replace(" ", "").replace("_", ""): c for c in fails.columns}
-        f_name = fcols.get("name", "Name")
-        f_method = fcols.get("method", None)
-        f_err = fcols.get("error", "Error")
-        f_occ = fcols.get("occurrences", None) or fcols.get("count", None) or "Occurrences"
-
-        def _cat(msg: object) -> str:
-            s = str(msg)
-            if re.search(r"\b5\d\d\b", s) or re.search(r"status\s*code\s*5\d\d", s, re.I):
-                return "5xx"
-            if re.search(r"timeout|timed\s*out|readtimeout|connecttimeout", s, re.I):
-                return "timeout"
-            if re.search(r"connection|refused|reset|broken\s*pipe|socket|dns|ssl|remote|protocol", s, re.I):
-                return "socket"
-            return "other"
-
-        fails["_cat"] = fails[f_err].map(_cat)
-        idx = [f_name]
-        if f_method and f_method in fails.columns:
-            idx.insert(0, f_method)
-        pivot = fails.pivot_table(index=idx, columns="_cat", values=f_occ, aggfunc="sum", fill_value=0).reset_index()
-        pivot = pivot.rename(columns={"5xx": "n_5xx", "timeout": "n_timeout", "socket": "n_socket"})
-    else:
-        pivot = pd.DataFrame(columns=[name_col, "n_5xx", "n_timeout", "n_socket"])
-        if method_col:
-            pivot[method_col] = ""
-
-    # ---- Name→entrypoint
-    rules: list[tuple[str, re.Pattern[str], str | None]] = []
-    if targets_yaml:
-        cfg = yaml.safe_load(Path(targets_yaml).read_text()) or {}
-        for ep, plist in (cfg.get("entrypoints") or {}).items():
-            for rule in (plist or []):
-                pat = rule.get("name_regex") or rule.get("re")
-                if not pat:
-                    continue
-                meth = rule.get("method")
-                try:
-                    cre = re.compile(str(pat))
-                except Exception:
-                    cre = re.compile(str(pat), re.I)
-                rules.append((str(ep), cre, (str(meth).upper() if meth else None)))
-
-    eps_filter: set[str] | None = None
-    if eps_path:
-        try:
-            eps_df = pd.read_csv(eps_path)
-            col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
-            eps_filter = set(str(x) for x in eps_df[col].dropna().tolist())
-        except Exception:
-            eps_filter = set(ln.strip() for ln in Path(eps_path).read_text().splitlines() if ln.strip())
-
-    # ---- join stats + failures
-    merge_keys = [name_col]
-    if method_col and method_col in df_stats.columns and method_col in pivot.columns:
-        merge_keys.insert(0, method_col)
-    dfm = df_stats.merge(pivot, on=merge_keys, how="left").fillna({"n_5xx": 0, "n_timeout": 0, "n_socket": 0})
-
-    # ---- aggregation by entrypoint
-    acc: dict[str, dict[str, float]] = {}
-    unmatched = Counter()
-    matched_eps: set[str] = set()
-    for _, r in dfm.iterrows():
-        name = str(r[name_col])
-        method = str(r.get(method_col, "")).upper() if method_col else ""
-        m = re.match(r"entry:([^:]+):", name)
-        ep = m.group(1) if m else None
-        if ep is None and rules:
-            for ep_name, cre, meth in rules:
-                if meth and meth != method:
-                    continue
-                if cre.search(name):
-                    ep = ep_name
-                    break
-        if eps_filter is not None and ep and ep not in eps_filter:
-            continue
-        if ep is None:
-            total_requests = float(pd.to_numeric(r.get(req_col), errors="coerce") or 0.0)
-            if total_requests > 0:
-                count = int(total_requests)
-                if count <= 0:
-                    count = 1
-                unmatched[name] += count
-            else:
-                unmatched[name] += 1
-            continue
-        n_total = float(pd.to_numeric(r[req_col], errors="coerce") or 0.0)
-        if n_total <= 0:
-            continue
-        n_5xx = float(r.get("n_5xx", 0.0) or 0.0)
-        n_to  = float(r.get("n_timeout", 0.0) or 0.0)
-        n_so  = float(r.get("n_socket", 0.0) or 0.0)
-        s = acc.setdefault(ep, {"n_total": 0.0, "n_5xx": 0.0, "n_timeout": 0.0, "n_socket": 0.0})
-        s["n_total"]  += n_total
-        s["n_5xx"]    += n_5xx
-        s["n_timeout"]+= n_to
-        s["n_socket"] += n_so
-        matched_eps.add(ep)
-
-    rows = []
-    for ep, s in acc.items():
-        bad = s["n_5xx"] + s["n_timeout"] + s["n_socket"]
-        R = 0.0 if s["n_total"] <= 0 else max(0.0, min(1.0, 1.0 - (bad / s["n_total"])))
-        rows.append({
-            "entrypoint": ep,
-            "p_fail": float(p_fail),
-            "R_live": float(R),
-            "n_total": int(s["n_total"]),
-            "n_5xx":   int(s["n_5xx"]),
-            "n_timeout": int(s["n_timeout"]),
-            "n_socket":  int(s["n_socket"]),
-        })
-
-    missing_eps: list[str] = []
-    if eps_filter:
-        missing_eps = sorted(eps_filter - matched_eps)
+    if df_rows.empty:
         if missing_eps:
             preview = ", ".join(missing_eps[:5])
-            click.echo(
-                f"[availability-live] warning: {len(missing_eps)} entrypoints from --entrypoints had no matching requests ({preview})",
-                err=True,
-            )
-
-    if not rows:
-        if eps_filter:
-            preview = ", ".join(missing_eps[:5]) if missing_eps else ""
             raise click.ClickException(
                 "No requests matched the provided --entrypoints filter. "
                 "Ensure the file lists entrypoints emitted by live targets and that mapping rules cover the Locust names."
@@ -1794,7 +1669,8 @@ def availability_live_cmd(
         )
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
-    df_out = pd.DataFrame(rows)
+    df_out = df_rows.copy()
+    df_out["p_fail"] = float(p_fail)
     if append and out_csv.exists():
         df_out.to_csv(out_csv, mode="a", header=False, index=False)
     else:
