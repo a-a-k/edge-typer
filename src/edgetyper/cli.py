@@ -1311,7 +1311,14 @@ def entrypoints_from_locust_cmd(
         raise click.ClickException(f"No data in {stats_path}")
 
     def _norm_col(name: str) -> str:
-        return name.lower().replace(" ", "").replace("_", "").replace("#", "")
+        return (
+            name.lower()
+            .replace(" ", "")
+            .replace("_", "")
+            .replace("#", "")
+            .replace("/", "")
+            .replace(":", "")
+        )
 
     col_map = {_norm_col(c): c for c in stats.columns}
     name_col = col_map.get("name", "Name")
