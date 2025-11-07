@@ -27,6 +27,20 @@ def main() -> None:
     pass
 
 
+def _slugify_entrypoint(label: str, taken: set[str]) -> str:
+    """Convert a Locust Name into a stable entrypoint identifier."""
+    slug = re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+    if not slug:
+        slug = "entrypoint"
+    base = slug
+    i = 2
+    while slug in taken:
+        slug = f"{base}-{i}"
+        i += 1
+    taken.add(slug)
+    return slug
+
+
 # ---------------- extract ----------------
 @main.command("extract")
 @click.option("--input", "input_path", type=click.Path(exists=True, dir_okay=False, path_type=Path), required=True)
@@ -1235,6 +1249,100 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
     click.echo(f"[debug] wrote {len(df)} matched edges with features → {out_csv}")
+
+
+# ---------------- entrypoints-from-locust ----------------
+@main.command("entrypoints-from-locust")
+@click.option(
+    "--locust-prefix", "locust_prefix",
+    type=click.Path(dir_okay=False, path_type=Path),
+    required=True,
+    help="Prefix passed to locust's --csv flag (without _stats.csv suffix).",
+)
+@click.option(
+    "--out-entrypoints", "out_entrypoints",
+    type=click.Path(dir_okay=False, path_type=Path),
+    required=False,
+    help="Destination for entrypoints list (CSV or newline-delimited text).",
+)
+@click.option(
+    "--out-targets", "out_targets",
+    type=click.Path(dir_okay=False, path_type=Path),
+    required=False,
+    help="Destination YAML mapping entrypoint→exact Locust Name regex.",
+)
+def entrypoints_from_locust_cmd(
+    locust_prefix: Path,
+    out_entrypoints: Path | None,
+    out_targets: Path | None,
+) -> None:
+    """Derive entrypoints directly from Locust stats, ensuring model/live parity."""
+    if out_entrypoints is None and out_targets is None:
+        raise click.ClickException("Provide --out-entrypoints and/or --out-targets.")
+
+    stats_path = locust_prefix.with_name(locust_prefix.name + "_stats.csv")
+    if not stats_path.exists():
+        raise click.ClickException(f"Locust stats file not found: {stats_path}")
+
+    stats = pd.read_csv(stats_path)
+    if stats.empty or len(stats.columns) == 0:
+        raise click.ClickException(f"No data in {stats_path}")
+
+    col_map = {c.lower().strip().replace(" ", "").replace("_", ""): c for c in stats.columns}
+    name_col = col_map.get("name", "Name")
+    if name_col not in stats.columns:
+        raise click.ClickException(f"'Name' column not found in {stats_path}")
+
+    df = stats.copy()
+    df[name_col] = df[name_col].astype(str)
+    df = df[~df[name_col].str.contains("Aggregated|Total", case=False, na=False)]
+
+    names: list[str] = []
+    seen = set()
+    for raw in df[name_col].tolist():
+        name = str(raw).strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+
+    if not names:
+        raise click.ClickException("No Locust request names found after filtering totals.")
+
+    taken_ids: set[str] = set()
+    entries = [
+        {
+            "id": _slugify_entrypoint(name, taken_ids),
+            "name": name,
+            "regex": f"^{re.escape(name)}$",
+        }
+        for name in names
+    ]
+
+    if out_entrypoints:
+        out_entrypoints.parent.mkdir(parents=True, exist_ok=True)
+        suffix = out_entrypoints.suffix.lower()
+        vals = [e["id"] for e in entries]
+        if suffix == ".csv":
+            pd.DataFrame({"entrypoint": vals}).to_csv(out_entrypoints, index=False)
+        elif suffix == ".tsv":
+            pd.DataFrame({"entrypoint": vals}).to_csv(out_entrypoints, index=False, sep="\t")
+        else:
+            out_entrypoints.write_text("\n".join(vals) + "\n")
+        click.echo(f"[entrypoints-from-locust] wrote {len(vals)} entrypoints → {out_entrypoints}")
+
+    if out_targets:
+        out_targets.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "entrypoints": {
+                e["id"]: [{"name_regex": e["regex"]}] for e in entries
+            }
+        }
+        out_targets.write_text(
+            yaml.safe_dump(payload, sort_keys=False),
+            encoding="utf-8",
+        )
+        click.echo(f"[entrypoints-from-locust] wrote regex mapping → {out_targets}")
 
 
 # ---------------- plan ----------------

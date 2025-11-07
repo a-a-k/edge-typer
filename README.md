@@ -158,6 +158,8 @@ You do **not** need to modify `locustfile.py`. The flow is:
    * `--entrypoints entrypoints.txt` (optional; keep model & live in sync),
    * `--p-fail <value>`, `--out live_availability.csv --append`.
 
+> **Want per-endpoint fidelity?** Run `edgetyper entrypoints-from-locust --locust-prefix <prefix> --out-entrypoints entrypoints.csv --out-targets live_targets.yaml`. This emits a 1:1 mapping for every `Name` in the Locust CSV, so both the live pipeline and the Monte-Carlo model operate on the exact same endpoint grid. The GitHub Actions workflows call this command automatically, so the “fire-and-forget” run already snapshots exact endpoints for each replica.
+
 **Example `live_targets.yaml`:**
 
 ```yaml
