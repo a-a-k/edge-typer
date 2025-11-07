@@ -646,14 +646,14 @@ def main() -> None:
     async_share = agg.get("labels_async_frac_weighted")
     mae_t = agg.get("mae_typed_overall")
     mae_b = agg.get("mae_block_overall")
-    win_rate = agg.get("win_rate_typed_overall")
+    win_rate_metric = agg.get("win_rate_typed_overall")
     if mae_t is not None and mae_b is not None:
         delta = mae_b - mae_t
         verdict = "Typed graph" if delta > 0 else ("All-blocking baseline" if delta < 0 else "Typed and all-blocking graphs")
         trend = "lower" if delta > 0 else ("higher" if delta < 0 else "the same")
         win_txt = ""
-        if win_rate is not None:
-            win_txt = f" Typed beat all-block on {win_rate * 100:.1f}% of pooled cells."
+        if win_rate_metric is not None:
+            win_txt = f" Typed beat all-block on {win_rate_metric * 100:.1f}% of pooled cells."
         async_txt = ""
         if async_share is not None:
             async_txt = f" Async coverage = {async_share * 100:.1f}% of edges."
