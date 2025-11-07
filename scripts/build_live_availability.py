@@ -65,6 +65,11 @@ def _infer_p_grid(typed_path: Optional[Path], p_grid_arg: Optional[str]) -> List
     return [0.1, 0.3, 0.5, 0.7, 0.9]
 
 
+def _normalize_name(value: str) -> str:
+    """Match the normalization used in entrypoints-from-locust (strip whitespace)."""
+    return str(value).strip()
+
+
 def _compute_failures_by_name(failures_df: Optional[pd.DataFrame]) -> Dict[str, int]:
     """
     Locust failures.csv typically has columns like: Method, Name/Request, Type, Error, Occurrences/Count.
@@ -76,11 +81,16 @@ def _compute_failures_by_name(failures_df: Optional[pd.DataFrame]) -> Dict[str, 
     cnt_col  = _pick_col(failures_df, ["Occurrences", "Count", "count", "occurrences"])
     if not name_col or not cnt_col:
         return {}
-    grp = failures_df.groupby(name_col)[cnt_col].sum()
+    df = failures_df.copy()
+    df[name_col] = df[name_col].astype(str).map(_normalize_name)
+    grp = df.groupby(name_col)[cnt_col].sum()
     out: Dict[str, int] = {}
     for k, v in grp.items():
         try:
-            out[str(k)] = int(v)
+            name = _normalize_name(k)
+            if not name:
+                continue
+            out[name] = int(v)
         except Exception:
             continue
     return out
@@ -102,12 +112,14 @@ def _extract_live_counts(stats_df: pd.DataFrame,
 
     # Drop the "Total" summary row if present
     df = stats_df.copy()
-    df[name_col] = df[name_col].astype(str)
+    df[name_col] = df[name_col].astype(str).map(_normalize_name)
     df = df[df[name_col].str.lower() != "total"]
 
     out: Dict[str, tuple[float, float]] = {}
     for _, row in df.iterrows():
-        name = str(row[name_col])
+        name = _normalize_name(row[name_col])
+        if not name:
+            continue
         try:
             total = float(pd.to_numeric(row[req_col], errors="coerce") or 0.0)
         except Exception:
