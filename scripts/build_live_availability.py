@@ -18,11 +18,15 @@ replica, entrypoint, p_fail, R_live
 from __future__ import annotations
 import argparse
 from pathlib import Path
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
+from collections import Counter
 import csv
+import re
 
 import math
 import pandas as pd
+
+_ENTRYPOINT_PREFIX = re.compile(r"entry:([^:]+):")
 
 
 def _read_csv(path: Path) -> Optional[pd.DataFrame]:
@@ -70,72 +74,119 @@ def _normalize_name(value: str) -> str:
     return str(value).strip()
 
 
-def _compute_failures_by_name(failures_df: Optional[pd.DataFrame]) -> Dict[str, int]:
+def _clean_numeric(val) -> float:
+    if isinstance(val, str):
+        val = val.replace(",", "").strip()
+    try:
+        num = pd.to_numeric(val, errors="coerce")
+    except Exception:
+        return 0.0
+    try:
+        f = float(num)
+    except Exception:
+        return 0.0
+    if not math.isfinite(f):
+        return 0.0
+    return f
+
+
+def _compute_failures_by_name(
+    failures_df: Optional[pd.DataFrame],
+    method_hint: Optional[str],
+) -> Dict[Tuple[str, str], Dict[str, float]]:
     """
-    Locust failures.csv typically has columns like: Method, Name/Request, Type, Error, Occurrences/Count.
-    We aggregate by the Request/Name column into a {entrypoint -> failures} map.
+    Aggregate failures.csv by (method, name) and bucket errors (5xx/timeout/socket/other).
+    Returns {(method,name) -> bucket_counts}.
     """
     if failures_df is None or failures_df.empty:
         return {}
     name_col = _pick_col(failures_df, ["Name", "Request", "name", "request"])
     cnt_col  = _pick_col(failures_df, ["Occurrences", "Count", "count", "occurrences"])
+    err_col  = _pick_col(failures_df, ["Error", "error", "Message"])
+    meth_col = method_hint if method_hint and method_hint in failures_df.columns else _pick_col(failures_df, ["Method", "method"])
     if not name_col or not cnt_col:
         return {}
+
+    def _bucket(msg: str) -> str:
+        s = str(msg)
+        if re.search(r"\b5\d\d\b", s) or re.search(r"status\s*code\s*5\d\d", s, re.I):
+            return "n_5xx"
+        if re.search(r"timeout|timed\s*out|readtimeout|connecttimeout", s, re.I):
+            return "n_timeout"
+        if re.search(r"connection|refused|reset|broken\s*pipe|socket|dns|ssl|remote|protocol", s, re.I):
+            return "n_socket"
+        return "n_other"
+
     df = failures_df.copy()
     df[name_col] = df[name_col].astype(str).map(_normalize_name)
-    grp = df.groupby(name_col)[cnt_col].sum()
-    out: Dict[str, int] = {}
-    for k, v in grp.items():
-        try:
-            name = _normalize_name(k)
-            if not name:
-                continue
-            out[name] = int(v)
-        except Exception:
-            continue
-    return out
+    if meth_col:
+        df[meth_col] = df[meth_col].astype(str).map(lambda s: s.upper().strip())
+    df["_bucket"] = df[err_col].map(_bucket) if err_col else "n_other"
+    df["_count"] = pd.to_numeric(df[cnt_col], errors="coerce").fillna(0.0)
 
-
-def _extract_live_counts(stats_df: pd.DataFrame,
-                           failures_map: Dict[str, int]) -> Dict[str, tuple[float, float]]:
-    """
-    Return per-request totals and bad counts: {request_name -> (total, bad)}.
-    We try to read Requests and Failures columns from stats_df;
-    if failures column is missing, we use failures_map (from failures.csv).
-    """
-    name_col = _pick_col(stats_df, ["Name", "name", "Request"])
-    req_col  = _pick_col(stats_df, ["Requests", "requests", "# requests", "Request Count", "Count"])
-    fail_col = _pick_col(stats_df, ["Failures", "failures", "# failures"])
-
-    if not name_col or not req_col:
-        return {}
-
-    # Drop the "Total" summary row if present
-    df = stats_df.copy()
-    df[name_col] = df[name_col].astype(str).map(_normalize_name)
-    df = df[df[name_col].str.lower() != "total"]
-
-    out: Dict[str, tuple[float, float]] = {}
+    agg: Dict[Tuple[str, str], Dict[str, float]] = {}
     for _, row in df.iterrows():
         name = _normalize_name(row[name_col])
         if not name:
             continue
-        try:
-            total = float(pd.to_numeric(row[req_col], errors="coerce") or 0.0)
-        except Exception:
+        method = str(row[meth_col]).upper().strip() if meth_col else ""
+        bucket = row["_bucket"]
+        entry = agg.setdefault((method, name), {"n_5xx": 0.0, "n_timeout": 0.0, "n_socket": 0.0, "n_other": 0.0})
+        entry[bucket] = entry.get(bucket, 0.0) + float(row["_count"])
+    return agg
+
+
+def _extract_live_counts(
+    stats_df: pd.DataFrame,
+    failures_map: Dict[Tuple[str, str], Dict[str, float]],
+) -> Tuple[Dict[str, tuple[float, Dict[str, float], str]], Optional[str]]:
+    """
+    Return ({request_name -> (total, bucket_counts, method)}, method_column_name_if_present)
+    """
+    name_col = _pick_col(stats_df, ["Name", "name", "Request"])
+    req_col  = _pick_col(stats_df, ["Requests", "requests", "# requests", "Request Count", "Count"])
+    fail_col = _pick_col(stats_df, ["Failures", "failures", "# failures"])
+    method_col = _pick_col(stats_df, ["Method", "method"])
+
+    if not name_col or not req_col:
+        return {}, method_col
+
+    df = stats_df.copy()
+    df[name_col] = df[name_col].astype(str)
+    df = df[~df[name_col].str.contains("Aggregated|Total", case=False, na=False)]
+
+    out: Dict[str, tuple[float, Dict[str, float], str]] = {}
+    for _, row in df.iterrows():
+        raw_name = str(row[name_col])
+        name = _normalize_name(raw_name)
+        if not name:
             continue
-        if not math.isfinite(total) or total <= 0:
+        total = _clean_numeric(row[req_col])
+        if total <= 0:
             continue
+        method = ""
+        if method_col and method_col in row:
+            method = str(row[method_col]).upper().strip()
+
         if fail_col and fail_col in row:
-            try:
-                bad = float(pd.to_numeric(row[fail_col], errors="coerce") or 0.0)
-            except Exception:
-                bad = 0.0
+            bad = _clean_numeric(row[fail_col])
+            bad = max(0.0, min(bad, total))
+            buckets = {
+                "n_5xx": bad,
+                "n_timeout": 0.0,
+                "n_socket": 0.0,
+                "n_other": 0.0,
+            }
         else:
-            bad = float(failures_map.get(name, 0) or 0.0)
-        bad = max(0.0, min(bad, total))
-        out[name] = (total, bad)
-    return out
+            buckets = failures_map.get((method, name)) or failures_map.get(("", name)) or {"n_5xx": 0.0, "n_timeout": 0.0, "n_socket": 0.0, "n_other": 0.0}
+            total_fail = buckets.get("n_5xx", 0.0) + buckets.get("n_timeout", 0.0) + buckets.get("n_socket", 0.0)
+            if total_fail > total:
+                scale = total / total_fail if total_fail > 0 else 0.0
+                for key in ("n_5xx", "n_timeout", "n_socket"):
+                    buckets[key] *= scale
+
+        out[name] = (total, buckets, method)
+    return out, method_col
 
 
 def main() -> None:
@@ -164,72 +215,95 @@ def main() -> None:
     if stats_df is None or stats_df.empty:
         return _bail(f"stats CSV is missing or empty: {args.stats}", code=2)
     failures_df = _read_csv(args.failures) if args.failures else None
-    failures_map = _compute_failures_by_name(failures_df)
+    stats_method_col = _pick_col(stats_df, ["Method", "method"])
+    failures_map = _compute_failures_by_name(failures_df, stats_method_col)
 
     # Extract per-request totals and bad counts
-    live_counts_by_name = _extract_live_counts(stats_df, failures_map)
+    live_counts_by_name, _ = _extract_live_counts(stats_df, failures_map)
     if not live_counts_by_name:
         return _bail("no valid per-request totals could be extracted from stats/failures CSVs", code=3)
 
-    # Map request names to entrypoints; default: everything → 'load-generator'
-    name_to_ep: Dict[str, str] = {}
     eps_filter: Optional[set[str]] = None
     if args.entrypoints and args.entrypoints.exists():
         try:
             df_eps = pd.read_csv(args.entrypoints)
             col = "entrypoint" if "entrypoint" in df_eps.columns else df_eps.columns[0]
-            eps_filter = set(str(x) for x in df_eps[col].dropna().astype(str).tolist())
+            eps_filter = set(str(x).strip() for x in df_eps[col].dropna().astype(str).tolist() if str(x).strip())
         except Exception:
-            # fallback to newline-delimited .txt
             try:
                 eps_filter = set(ln.strip() for ln in args.entrypoints.read_text(encoding="utf-8").splitlines() if ln.strip())
             except Exception:
                 eps_filter = None
         if eps_filter is not None and not eps_filter:
             eps_filter = None
+
+    rules: list[tuple[str, re.Pattern[str], Optional[str]]] = []
     if args.targets and args.targets.exists():
         import yaml
         try:
             cfg = yaml.safe_load(args.targets.read_text()) or {}
-            rules: list[tuple[str, str]] = []
             for ep, plist in (cfg.get("entrypoints") or {}).items():
                 for rule in (plist or []):
                     pat = str(rule.get("name_regex") or rule.get("re") or ".*")
-                    rules.append((str(ep), pat))
-            import re
-            for name in live_counts_by_name.keys():
-                ep_hit: Optional[str] = None
-                for ep, pat in rules:
+                    meth = rule.get("method")
                     try:
-                        if re.search(pat, name):
-                            ep_hit = ep; break
+                        cre = re.compile(pat)
                     except Exception:
-                        try:
-                            if re.search(pat, name, re.I):
-                                ep_hit = ep; break
-                        except Exception:
-                            continue
-                name_to_ep[name] = ep_hit or "load-generator"
+                        cre = re.compile(pat, re.I)
+                    rules.append((str(ep), cre, (str(meth).upper().strip() if meth else None)))
         except Exception:
-            name_to_ep = {name: "load-generator" for name in live_counts_by_name.keys()}
-    else:
-        name_to_ep = {name: "load-generator" for name in live_counts_by_name.keys()}
+            rules = []
+
+    def _map_entrypoint(name: str, method: str) -> Optional[str]:
+        prefix = _ENTRYPOINT_PREFIX.match(name)
+        if prefix:
+            return prefix.group(1).strip()
+        for ep, cre, meth in rules:
+            if meth and method and meth != method:
+                continue
+            if cre.search(name):
+                return ep
+        return None
 
     # Aggregate by mapped entrypoint and optionally filter using WEIGHTED totals
     ep_totals: Dict[str, float] = {}
     ep_bad: Dict[str, float] = {}
-    for name, (total, bad) in live_counts_by_name.items():
-        ep = name_to_ep.get(name, "load-generator")
+    matched_eps: set[str] = set()
+    unmatched = Counter()
+    for name, (total, buckets, method) in live_counts_by_name.items():
+        ep = _map_entrypoint(name, method or "")
+        if ep is None:
+            unmatched[name] += max(1, int(total))
+            continue
         if eps_filter is not None and ep not in eps_filter:
             continue
+        matched_eps.add(ep)
         ep_totals[ep] = ep_totals.get(ep, 0.0) + float(total)
-        ep_bad[ep]    = ep_bad.get(ep, 0.0) + float(bad)
+        bad = float(buckets.get("n_5xx", 0.0) + buckets.get("n_timeout", 0.0) + buckets.get("n_socket", 0.0))
+        ep_bad[ep]    = ep_bad.get(ep, 0.0) + bad
 
     live_by_ep: Dict[str, float] = {}
     for ep, tot in ep_totals.items():
         bad = ep_bad.get(ep, 0.0)
         R = 0.0 if tot <= 0 else max(0.0, min(1.0, 1.0 - (bad / tot)))
         live_by_ep[ep] = R
+
+    missing_eps: list[str] = []
+    if eps_filter:
+        missing_eps = sorted(eps_filter - matched_eps)
+        if missing_eps:
+            preview = ", ".join(missing_eps[:5])
+            msg = (
+                f"live availability missing {len(missing_eps)} entrypoints from filter "
+                f"(examples: {preview}). Did Locust emit any requests for them or do the regex rules need adjusting?"
+            )
+            if args.strict:
+                return _bail(msg, code=5)
+            print(f"[availability-live] WARNING: {msg}")
+
+    if unmatched:
+        top = ", ".join(f"{name} ({cnt})" for name, cnt in unmatched.most_common(5))
+        print(f"[availability-live] WARNING: ignored {sum(unmatched.values())} requests with no entrypoint mapping (e.g., {top})")
 
     grid = _infer_p_grid(args.typed, args.p_grid)
     replica = args.replica or ""
