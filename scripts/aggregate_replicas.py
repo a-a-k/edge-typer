@@ -444,9 +444,11 @@ def main() -> None:
 
     # ---- Model (typed/block) vs live ----
     download_links: list[str] = []
+    has_live_data = False
     live_join_html = ""
     try:
         if avail_live_frames and avail_typed_frames and avail_block_frames:
+            has_live_data = True
             av_t_all = pd.concat(avail_typed_frames, ignore_index=True).rename(columns={"R_model": "R_model_typed"})
             av_b_all = pd.concat(avail_block_frames, ignore_index=True).rename(columns={"R_model": "R_model_block"})
             av_l_all = pd.concat(avail_live_frames,  ignore_index=True)
@@ -618,6 +620,61 @@ def main() -> None:
             f"MAE_block={fmt_ci(agg.get('mae_block_ci95'))}, "
             f"win_rate_typed={fmt_ci(agg.get('win_rate_typed_ci95'), pct=True)}</p>"
         )
+    else:
+        live_summary_html = (
+            "<h2>Availability error (overall)</h2>"
+            + (
+                "<p>Live availability was not captured for these replicas, so MAE/win-rate were not computed.</p>"
+                if not has_live_data else
+                "<p>Live datasets were available but the summary table could not be produced. "
+                "Check <code>data/availability_errors_overall.csv</code>.</p>"
+            )
+        )
+
+    if not live_join_html:
+        live_join_html = (
+            "<h2>Availability: model vs live (pooled)</h2>"
+            + (
+                "<p>Skipped because no live availability measurements were provided.</p>"
+                if not has_live_data else
+                "<p>Live measurements exist, but the pooled table could not be rendered. "
+                "Download <code>data/availability_join_pooled.csv</code> for raw values.</p>"
+            )
+        )
+
+    interpretation_html = ""
+    async_share = agg.get("labels_async_frac_weighted")
+    mae_t = agg.get("mae_typed_overall")
+    mae_b = agg.get("mae_block_overall")
+    win_rate = agg.get("win_rate_typed_overall")
+    if mae_t is not None and mae_b is not None:
+        delta = mae_b - mae_t
+        verdict = "Typed graph" if delta > 0 else ("All-blocking baseline" if delta < 0 else "Typed and all-blocking graphs")
+        trend = "lower" if delta > 0 else ("higher" if delta < 0 else "the same")
+        win_txt = ""
+        if win_rate is not None:
+            win_txt = f" Typed beat all-block on {win_rate * 100:.1f}% of pooled cells."
+        async_txt = ""
+        if async_share is not None:
+            async_txt = f" Async coverage = {async_share * 100:.1f}% of edges."
+        interpretation_html = (
+            "<h2>Interpretation</h2>"
+            f"<p>{verdict} achieved {trend} MAE overall "
+            f"(typed={fmt(mae_t)}, all-block={fmt(mae_b)}, Δ={fmt(delta)})."
+            f"{win_txt}{async_txt}</p>"
+        )
+    elif not has_live_data:
+        interpretation_html = (
+            "<h2>Interpretation</h2>"
+            "<p>Live availability data was not captured, so MAE and win-rate comparisons are unavailable."
+            " The tables below reflect only the Monte-Carlo model outputs.</p>"
+        )
+    else:
+        interpretation_html = (
+            "<h2>Interpretation</h2>"
+            "<p>Live availability was present but some post-processing failed. "
+            "Refer to the CSV downloads for raw metrics.</p>"
+        )
 
     # --- availability-only mode: build a minimal page and exit early ---
     if os.getenv("AVAIL_ONLY", "0") == "1":
@@ -628,6 +685,7 @@ def main() -> None:
             "table{border-collapse:collapse}td,th{border:1px solid #ddd;padding:6px 10px}</style>"
             f"<h1>EdgeTyper — Aggregate (n={agg['n_replicas']}, soak=1800s)</h1>"
             f"{label_html}"
+            f"{interpretation_html}"
             f"{avail_table_html}"
             f"{live_summary_html}"
             f"{live_join_html}"
@@ -653,6 +711,7 @@ def main() -> None:
   <li>Ours — Timing dropped: {fmt(agg['macroF1_means'].get('macroF1_ours_timing_drop'))}</li>
 </ul>
 {label_html}
+{interpretation_html}
 <h2>Prediction vs live (pooled)</h2>
 <table>
   <tr><th>Metric</th><th>Typed</th><th>All-blocking</th><th>Win rate (typed &gt; block)</th></tr>

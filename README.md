@@ -188,7 +188,7 @@ Use the Python script (not the `report` command) to build a **lightweight availa
 
 * **Availability‑only** (recommended while validating live): set `AVAIL_ONLY=1`.
   The page shows **pooled Monte‑Carlo availability** (typed vs all‑blocking). If each `replicate-*` directory also contains `live_availability.csv`, the page additionally shows **“Availability: model vs live (pooled)”** with MAE by `p_fail`, overall MAE, and **win‑rate** (share of cells where typed is closer to live).
-  The aggregator also surfaces **label coverage (async vs uncertain)** and bootstrap **95% CIs** for the model‑vs‑live comparison (MAE and win rate).
+  The aggregator also surfaces **label coverage (async vs uncertain)**, an **Interpretation** paragraph that states whether typed edges beat all-blocking (with MAE/win-rate deltas), and bootstrap **95% CIs** for all reported metrics.
 
 ```bash
 # Aggregate N replica folders (replicate-1/, replicate-2/, …) into `site/`
