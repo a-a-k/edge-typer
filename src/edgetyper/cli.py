@@ -1255,9 +1255,9 @@ def debug_cmd(features_path: Path, gt_path: Path, pred_path: Path | None, out_cs
 @main.command("entrypoints-from-locust")
 @click.option(
     "--locust-prefix", "locust_prefix",
-    type=click.Path(dir_okay=False, path_type=Path),
+    type=click.Path(path_type=Path),
     required=True,
-    help="Prefix passed to locust's --csv flag (without _stats.csv suffix).",
+    help="Prefix passed to locust's --csv flag (without _stats.csv suffix) or the stats CSV itself.",
 )
 @click.option(
     "--out-entrypoints", "out_entrypoints",
@@ -1280,9 +1280,26 @@ def entrypoints_from_locust_cmd(
     if out_entrypoints is None and out_targets is None:
         raise click.ClickException("Provide --out-entrypoints and/or --out-targets.")
 
-    stats_path = locust_prefix.with_name(locust_prefix.name + "_stats.csv")
-    if not stats_path.exists():
-        raise click.ClickException(f"Locust stats file not found: {stats_path}")
+    stats_path = locust_prefix
+    if stats_path.is_dir():
+        candidate = stats_path.parent / f"{stats_path.name}_stats.csv"
+        if candidate.exists():
+            stats_path = candidate
+        else:
+            raise click.ClickException(
+                f"--locust-prefix was a directory ({locust_prefix}); expected {candidate} to exist."
+            )
+    elif stats_path.is_file():
+        if not stats_path.name.endswith("_stats.csv"):
+            raise click.ClickException(
+                f"--locust-prefix points to a file ({stats_path}). Expected a *_stats.csv file."
+            )
+    else:
+        candidate = stats_path.with_name(stats_path.name + "_stats.csv")
+        if candidate.exists():
+            stats_path = candidate
+        else:
+            raise click.ClickException(f"Locust stats file not found: {candidate}")
 
     stats = pd.read_csv(stats_path)
     if stats.empty or len(stats.columns) == 0:
