@@ -436,6 +436,39 @@ jobs:
             --entrypoints "${RUN_DIR}/entrypoints.csv" \
             --out         "${RUN_DIR}/live_availability.csv"
 
+      - name: Validate live vs model grids
+        run: |
+          python - <<'PY'
+          import pandas as pd, os
+          from pathlib import Path
+
+          run = Path(os.environ["RUN_DIR"])
+          typed = pd.read_csv(run / "availability_typed.csv")
+          live = pd.read_csv(run / "live_availability.csv")
+
+          if typed.empty:
+              raise SystemExit("availability_typed.csv is empty; model did not produce any rows.")
+          if live.empty:
+              raise SystemExit("live_availability.csv is empty; no Locust measurements recorded.")
+
+          def _pairs(df):
+              return {
+                  (str(r["entrypoint"]), float(r["p_fail"]))
+                  for _, r in df.iterrows()
+              }
+
+          typed_pairs = _pairs(typed)
+          live_pairs = _pairs(live)
+          missing = sorted(typed_pairs - live_pairs)
+          if missing:
+              examples = ", ".join(f"{e}:{p}" for e, p in missing[:5])
+              raise SystemExit(
+                  f"Live availability missing {len(missing)} entrypoint×p_fail rows; "
+                  f"first few: {examples}"
+              )
+          print(f"[validate] Live grid matches model ({len(live_pairs)} rows).")
+          PY
+
           # Ensure the file exists and contains data (header + ≥1 row)
           if [[ ! -s "${RUN_DIR}/live_availability.csv" ]]; then
             echo "::error ::[live] live_availability.csv was not produced or is empty." >&2

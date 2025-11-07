@@ -445,6 +445,8 @@ def main() -> None:
     # ---- Model (typed/block) vs live ----
     download_links: list[str] = []
     has_live_data = False
+    errors_overall_exists = False
+    join_csv_exists = False
     live_join_html = ""
     try:
         if avail_live_frames and avail_typed_frames and avail_block_frames:
@@ -511,9 +513,11 @@ def main() -> None:
                                   "<table><thead><tr><th>p_fail</th><th>Live</th><th>Typed</th>"
                                   "<th>All-blocking</th><th>MAE typed</th><th>MAE all-block</th><th>ΔMAE</th>"
                                   "</tr></thead><tbody>" + rows + "</tbody></table>")
+                join_csv_exists = True
                 pd.DataFrame([{"MAE_typed": overall_mae_t,
                                "MAE_block": overall_mae_b,
                                "win_rate_typed": winrate}]).to_csv(data_dir / "availability_errors_overall.csv", index=False)
+                errors_overall_exists = True
 
                 download_links.extend([
                     '<li><a href="data/availability_join_pooled.csv" download>availability_join_pooled.csv</a></li>',
@@ -626,9 +630,13 @@ def main() -> None:
             + (
                 "<p>Live availability was not captured for these replicas, so MAE/win-rate were not computed.</p>"
                 if not has_live_data else
-                "<p>Live datasets were available but the summary table could not be produced. "
-                "Download <a href='data/availability_errors_overall.csv' download>data/availability_errors_overall.csv</a> "
-                "for the raw MAE rows.</p>"
+                (
+                    "<p>Live datasets were available but the summary table could not be produced. "
+                    "Download <a href='data/availability_errors_overall.csv' download>data/availability_errors_overall.csv</a> "
+                    "for the raw MAE rows.</p>"
+                    if errors_overall_exists else
+                    "<p>Live datasets were available but the summary CSV was not generated (check aggregation logs for details).</p>"
+                )
             )
         )
 
@@ -638,9 +646,13 @@ def main() -> None:
             + (
                 "<p>Skipped because no live availability measurements were provided.</p>"
                 if not has_live_data else
-                "<p>Live measurements exist, but the pooled table could not be rendered. "
-                "Download <a href='data/availability_join_pooled.csv' download>data/availability_join_pooled.csv</a> "
-                "for the raw cell-by-cell errors.</p>"
+                (
+                    "<p>Live measurements exist, but the pooled table could not be rendered. "
+                    "Download <a href='data/availability_join_pooled.csv' download>data/availability_join_pooled.csv</a> "
+                    "for the raw cell-by-cell errors.</p>"
+                    if join_csv_exists else
+                    "<p>Live measurements exist, but the join across replicas produced no rows (see aggregate logs).</p>"
+                )
             )
         )
 
@@ -674,10 +686,15 @@ def main() -> None:
     else:
         interpretation_html = (
             "<h2>Interpretation</h2>"
-            "<p>Live availability was present but some post-processing failed. "
-            "Download <a href='data/availability_errors_overall.csv' download>availability_errors_overall.csv</a> "
-            "and <a href='data/availability_join_pooled.csv' download>availability_join_pooled.csv</a> "
-            "for raw metrics.</p>"
+            + (
+                "<p>Live availability was present but some post-processing failed. "
+                "Download <a href='data/availability_errors_overall.csv' download>availability_errors_overall.csv</a> "
+                "and <a href='data/availability_join_pooled.csv' download>availability_join_pooled.csv</a> "
+                "for raw metrics.</p>"
+                if (errors_overall_exists or join_csv_exists) else
+                "<p>Live availability was present but the aggregated CSVs were not generated. "
+                "Inspect the aggregate job logs for details.</p>"
+            )
         )
 
     # --- availability-only mode: build a minimal page and exit early ---
