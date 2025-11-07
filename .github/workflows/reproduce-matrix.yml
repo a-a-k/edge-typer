@@ -543,27 +543,18 @@ jobs:
         run: |
           AVAIL_ONLY=1 python scripts/aggregate_replicas.py --replicas-dir replicas --outdir site
 
-      - name: Build aggregate site (Availability section)
+      - name: Preview aggregate outputs
         run: |
           set -euo pipefail
-          # replicas are downloaded by the job into ./replicas (standard actions/download-artifact destination)
-          ls -lah replicas || true
-          # Generate Availability tables + aggregate artifacts and overwrite site/index.html
-          if [ -f scripts/aggregate_site_v5.py ]; then
-            python scripts/aggregate_site_v5.py --replicas-root "replicas" --site "site"
-            echo "[aggregate] v5 OK"
-          elif [ -f scripts/aggregate_site_v4.py ]; then
-            python scripts/aggregate_site_v4.py --replicas-root "replicas" --site "site"
-            echo "[aggregate] v4 OK"
-          elif [ -f scripts/aggregate_site_v3.py ]; then
-            python scripts/aggregate_site_v3.py --replicas-root "replicas" --site "site"
-            echo "[aggregate] v3 OK"
-          else
-            echo "::error ::No aggregate script found"
-            exit 1
-          fi
-          echo "[aggregate] Done. Listing site/data:" && ls -lah site/data || true
-          echo "[aggregate] Preview pooled CSVs:" && for f in site/data/*.csv; do echo "-- $f"; head -n 10 "$f" || true; done
+          echo "[aggregate] Listing site/:"
+          ls -lah site || true
+          echo "[aggregate] Listing site/data:"
+          ls -lah site/data || true
+          echo "[aggregate] Preview CSVs:"
+          for f in site/data/*.csv; do
+            echo "-- $f"
+            head -n 10 "$f" || true
+          done
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
