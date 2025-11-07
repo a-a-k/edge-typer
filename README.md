@@ -161,6 +161,8 @@ You do **not** need to modify `locustfile.py`. The flow is:
 > **Want per-endpoint fidelity?** Run `edgetyper entrypoints-from-locust --locust-prefix <prefix> --out-entrypoints entrypoints.csv --out-targets live_targets.yaml`. This emits a 1:1 mapping for every `Name` in the Locust CSV, so both the live pipeline and the Monte-Carlo model operate on the exact same endpoint grid. The GitHub Actions workflows call this command automatically, so the “fire-and-forget” run already snapshots exact endpoints for each replica.
 > Entries with fewer than 1 request in the Locust stats are skipped to avoid expecting live data that never arrives.
 
+> **Sampling guardrail (CI).** In the matrix workflow we pass `--min-requests 25` to drop endpoints that only ever see a handful of Locust calls; otherwise the validation step fails because there is no live signal to compare against. Adjust the threshold if your workload drives different traffic volumes.
+
 **Example `live_targets.yaml`:**
 
 ```yaml

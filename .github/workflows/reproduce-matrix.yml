@@ -249,6 +249,7 @@ jobs:
           # Freeze entrypoints directly from Locust stats for model/live parity
           edgetyper entrypoints-from-locust \
             --locust-prefix "${LOCUST_PREFIX}" \
+            --min-requests 25 \
             --out-entrypoints "${RUN_DIR}/entrypoints.csv" \
             --out-targets "${RUN_DIR}/live_targets.yaml"
           python - <<'PY'
