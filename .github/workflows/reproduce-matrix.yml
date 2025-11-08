@@ -248,7 +248,7 @@ jobs:
 
           # Derive entrypoints + live availability directly from Locust CSVs
           python scripts/build_live_availability.py \
-            --stats "${LOCUST_STATS}" \
+            --stats "${STATS}" \
             --failures "${LOCUST_FAILURES}" \
             --replica "replicate-${REPL_ID}" \
             --min-requests 25 \
