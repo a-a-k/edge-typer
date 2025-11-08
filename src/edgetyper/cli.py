@@ -1717,7 +1717,7 @@ def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None
         try:
             eps_df = pd.read_csv(eps_path)
             col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
-            entrypoints = [str(x) for x in eps_df[col].dropna().astype(str).tolist()]
+            entrypoints = [str(x).strip() for x in eps_df[col].dropna().astype(str).tolist() if str(x).strip()]
         except Exception:
             entrypoints = [ln.strip() for ln in Path(eps_path).read_text().splitlines() if ln.strip()]
     else:
