@@ -8,7 +8,7 @@ This repository contains:
 * an aggregator (`scripts/aggregate_replicas.py`) that merges per‑replica outputs into a static site;
 * a fixed live pipeline that **post‑processes Locust CSV files** to compute live availability on the *same* grid (entrypoint × failure rate) as the model estimates, enabling a direct, apples‑to‑apples comparison.
 
-> **Scope & reproducibility.** This repository is not a generic product. It is a reproducible experiment that targets the stock OpenTelemetry Demo workload (the Locust scenario shipped with `opentelemetry-demo`). Entry points are fixed ahead of time (`config/entrypoints.{txt,csv}`) and the Locust→service mapping is anchored in `config/live_targets.yaml`. The workflow never “guesses” entrypoints or routes; if those files do not match the workload, the run fails immediately.
+> **Scope & reproducibility.** This repository is not a generic product. It is a reproducible experiment that targets the stock OpenTelemetry Demo workload (the Locust scenario shipped with `opentelemetry-demo`). Entry points are fixed ahead of time (`config/entrypoints.txt`) and the Locust→service mapping is anchored in `config/live_targets.yaml`. The workflow never “guesses” entrypoints or routes; if those files do not match the workload, the run fails immediately.
 
 The availability estimator follows the **topological model** and **live success definition** described in the attached study:
 
@@ -77,7 +77,7 @@ edgetyper resilience --edges out/edges.parquet --pred out/pred_ours.csv --out ou
 python scripts/build_live_availability.py \
   --stats out/locust_0.3_stats.csv \
   --failures out/locust_0.3_failures.csv \
-  --entrypoints config/entrypoints.csv \
+  --entrypoints config/entrypoints.txt \
   --targets config/live_targets.yaml \
   --replica replicate-001 \
   --p-grid "0.1,0.3,0.5,0.7,0.9" \
@@ -161,14 +161,14 @@ You do **not** need to modify `locustfile.py`. The flow is:
    python scripts/build_live_availability.py \
      --stats       <prefix>_stats.csv \
      --failures    <prefix>_failures.csv \
-     --entrypoints config/entrypoints.csv \
+     --entrypoints config/entrypoints.txt \
      --targets     config/live_targets.yaml \
      --replica     replicate-001 \
      --p-grid      "0.1,0.3,0.5,0.7,0.9" \
      --out         live_availability.csv
    ```
 
-> **Fixed entrypoints.** `config/entrypoints.{csv,txt}` and `config/live_targets.yaml` are the single source of truth for this experiment. Copy them into your run directory (the GitHub Actions workflow does this automatically) before running `edgetyper resilience` or `scripts/build_live_availability.py`. If you tweak the workload, edit these files manually and commit the change so the experiment stays reproducible.
+> **Fixed entrypoints.** `config/entrypoints.txt` and `config/live_targets.yaml` are the single source of truth for this experiment. Copy them into your run directory (the GitHub Actions workflow does this automatically) before running `edgetyper resilience` or `scripts/build_live_availability.py`. If you tweak the workload, edit these files manually and commit the change so the experiment stays reproducible.
 > Entries that never receive Locust requests will fail the live step; the workflow surfaces the missing `(entrypoint,p_fail)` pairs via `missing_live_entrypoints.txt`.
 
 The default `live_targets.yaml` intentionally routes **every** Locust Name to the `frontend` entrypoint (the only externally exposed service in the demo). If you introduce additional entrypoints, duplicate the block and provide tighter regexes.

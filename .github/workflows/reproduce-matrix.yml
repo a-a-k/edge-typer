@@ -253,7 +253,6 @@ jobs:
             --out "${RUN_DIR}/graph.json"
 
           # Fixed entrypoints + live-target mapping for this experiment
-          cp config/entrypoints.csv "${RUN_DIR}/entrypoints.csv"
           cp config/entrypoints.txt "${RUN_DIR}/entrypoints.txt"
           cp config/live_targets.yaml "${RUN_DIR}/live_targets.yaml"
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
@@ -418,7 +417,7 @@ jobs:
           python scripts/build_live_availability.py \
             --stats       "${STATS}" \
             --failures    "${FAILS}" \
-            --entrypoints "${RUN_DIR}/entrypoints.csv" \
+            --entrypoints "${RUN_DIR}/entrypoints.txt" \
             --targets     "${RUN_DIR}/live_targets.yaml" \
             --replica     "replicate-${REPL_ID}" \
             --p-grid      "0.1,0.3,0.5,0.7,0.9" \
@@ -549,7 +548,6 @@ jobs:
             ${{ env.RUN_DIR }}/edges.parquet
             ${{ env.RUN_DIR }}/pred_ours.csv
             ${{ env.RUN_DIR }}/entrypoints.txt
-            ${{ env.RUN_DIR }}/entrypoints.csv
             ${{ env.RUN_DIR }}/live_targets.yaml
             ${{ env.RUN_DIR }}/missing_live_entrypoints.txt
 

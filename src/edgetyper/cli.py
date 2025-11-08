@@ -1714,12 +1714,17 @@ def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None
 
     # entrypoints (filter to services present in graph; fallback if none)
     if eps_path:
-        try:
-            eps_df = pd.read_csv(eps_path)
-            col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
-            entrypoints = [str(x).strip() for x in eps_df[col].dropna().astype(str).tolist() if str(x).strip()]
-        except Exception:
-            entrypoints = [ln.strip() for ln in Path(eps_path).read_text().splitlines() if ln.strip()]
+        path = Path(eps_path)
+        if path.suffix.lower() == ".txt":
+            entrypoints = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+        else:
+            try:
+                eps_df = pd.read_csv(path)
+            except Exception:
+                entrypoints = [ln.strip() for ln in path.read_text().splitlines() if ln.strip()]
+            else:
+                col = "entrypoint" if "entrypoint" in eps_df.columns else eps_df.columns[0]
+                entrypoints = [str(x).strip() for x in eps_df[col].dropna().astype(str).tolist() if str(x).strip()]
     else:
         entrypoints = guess_entrypoints(adj)
 
