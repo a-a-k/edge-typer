@@ -144,6 +144,7 @@ def main() -> None:
     ap.add_argument("--strict", action="store_true", default=True, help="fail if coverage incomplete")
     ap.add_argument("--no-strict", dest="strict", action="store_false")
     ap.add_argument("--out", required=True, type=Path, help="live_availability.csv")
+    ap.add_argument("--append", action="store_true", help="append rows instead of overwriting", default=False)
     args = ap.parse_args()
 
     stats = _read_locust_csv(args.stats)
@@ -224,9 +225,11 @@ def main() -> None:
         raise SystemExit("[availability-live] no entrypoints produced live availability rows; check stats/mapping.")
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    with args.out.open("w", newline="") as f:
+    mode = "a" if args.append and args.out.exists() else "w"
+    with args.out.open(mode, newline="") as f:
         writer = csv.DictWriter(f, fieldnames=["replica", "entrypoint", "p_fail", "R_live"])
-        writer.writeheader()
+        if mode == "w":
+            writer.writeheader()
         writer.writerows(rows)
     print(f"[availability-live] wrote {len(rows)} rows → {args.out}")
 
