@@ -29,8 +29,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        i: [1,2,3,4,5] #,6,7,8,9,10,11,12,13,14,15,16]
-        j: [1,2,3,4,5] #,6,7,8,9,10,11,12,13,14,15,16]
+        rate: [0.1, 0.3, 0.5, 0.7, 0.9]
+        replica: [1,2,3,4,5]
     env:
       SOAK_SECONDS: "280"
       MISSING_LIVE_COUNT: "0"
@@ -45,11 +45,11 @@ jobs:
 
       - name: Compute REPL_ID and RUN_DIR
         run: |
-          I=${{ matrix.i }}
-          J=${{ matrix.j }}
-          REPL_ID=$(( ( (I-1)*16 ) + J ))
-          echo "REPL_ID=$REPL_ID" >> $GITHUB_ENV
-          echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${REPL_ID}" >> $GITHUB_ENV
+          RATE=${{ matrix.rate }}
+          REPL=${{ matrix.replica }}
+          echo "P_FAIL=${RATE}" >> $GITHUB_ENV
+          echo "REPL_ID=${RATE}-${REPL}" >> $GITHUB_ENV
+          echo "RUN_DIR=$GITHUB_WORKSPACE/runs/${RATE}/${REPL}" >> $GITHUB_ENV
 
       - name: Ensure run output dirs
         shell: bash
@@ -426,9 +426,6 @@ jobs:
           PY
 
       - name: Build live availability from Locust CSV (mandatory)
-        env:
-          LOCUST_STATS: ${{ env.LOCUST_STATS }}
-          LOCUST_FAILURES: ${{ env.LOCUST_FAILURES }}
         run: |
           set -euo pipefail
           STATS="${LOCUST_STATS}"
@@ -444,7 +441,8 @@ jobs:
             --entrypoints "${RUN_DIR}/entrypoints.txt" \
             --targets     "${RUN_DIR}/live_targets.yaml" \
             --replica     "replicate-${REPL_ID}" \
-            --p-grid      "0.1,0.3,0.5,0.7,0.9" \
+            --p-grid      "${P_FAIL}" \
+            --append \
             --no-strict \
             --out         "${RUN_DIR}/live_availability.csv"
 

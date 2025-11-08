@@ -80,8 +80,8 @@ python scripts/build_live_availability.py \
   --entrypoints config/entrypoints.txt \
   --targets config/live_targets.yaml \
   --replica replicate-001 \
-  --p-grid "0.1,0.3,0.5,0.7,0.9" \
-  --out out/live_availability.csv                 
+  --p-grid 0.3 \
+  --out out/live_availability.csv --append                
 
 # 8) Aggregate one or more replicas into a site (availability‑only mode)
 python scripts/aggregate_replicas.py --replicas-dir runs --outdir site  # set AVAIL_ONLY=1 to hide rank/CI blocks
@@ -155,7 +155,7 @@ Post‑processes **Locust CSV** outputs into `live_availability.csv` using the *
 You do **not** need to modify `locustfile.py`. The flow is:
 
 1. For each (p_{\text{fail}}) in `{0.1,0.3,0.5,0.7,0.9}`, inject failures (kill a fraction of replicas) and run a **fixed‑rate** Locust window (`--csv <prefix>`, `--csv-full-history`, constant `-R`, fixed `-d`) as in the study. 
-2. Post-process the resulting CSVs with:
+2. After **each** Locust window, append rows by running:
 
    ```bash
    python scripts/build_live_availability.py \
@@ -164,11 +164,11 @@ You do **not** need to modify `locustfile.py`. The flow is:
      --entrypoints config/entrypoints.txt \
      --targets     config/live_targets.yaml \
      --replica     replicate-001 \
-     --p-grid      "0.1,0.3,0.5,0.7,0.9" \
-     --out         live_availability.csv
+     --p-grid      <current p_fail> \
+     --out         live_availability.csv --append
    ```
 
-> **Fixed entrypoints.** `config/entrypoints.txt` and `config/live_targets.yaml` are the single source of truth for this experiment. Copy them into your run directory (the GitHub Actions workflow does this automatically) before running `edgetyper resilience` or `scripts/build_live_availability.py`. If you tweak the workload, edit these files manually and commit the change so the experiment stays reproducible.
+> **Fixed entrypoints.** `config/entrypoints.txt` and `config/live_targets.yaml` are the single source of truth for this experiment. Copy them into your run directory (the GitHub Actions workflow does this automatically) before running `edgetyper resilience` or appending live measurements. If you tweak the workload, edit these files manually and commit the change so the experiment stays reproducible.
 > Entries that never receive Locust requests will fail the live step; the workflow surfaces the missing `(entrypoint,p_fail)` pairs via `missing_live_entrypoints.txt`.
 
 The default `live_targets.yaml` intentionally routes **every** Locust Name to the `frontend` entrypoint (the only externally exposed service in the demo). If you introduce additional entrypoints, duplicate the block and provide tighter regexes.
