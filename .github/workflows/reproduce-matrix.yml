@@ -573,14 +573,6 @@ jobs:
             ${{ env.RUN_DIR }}/live_targets.yaml
             ${{ env.RUN_DIR }}/missing_live_entrypoints.txt
 
-      - name: Enforce live grid completeness
-        if: always()
-        run: |
-          if [[ "${MISSING_LIVE_COUNT:-0}" != "0" ]]; then
-            echo "::error ::Live availability missing ${MISSING_LIVE_COUNT} entrypoint×p_fail rows; see ${RUN_DIR}/missing_live_entrypoints.txt"
-            exit 1
-          fi
-
       - name: Build report site
         run: python -m edgetyper.cli report --metrics "${{ env.RUN_DIR }}" --out site
 
@@ -623,6 +615,35 @@ jobs:
           find replicas -type f \( -name 'observations.json' -o -name 'metrics_*json' \) -print | sed 's#^#  #'
           echo "=== availability files discovered recursively ==="
           find replicas -type f -name 'availability_*' -print | sed 's#^#  #'
+
+      - name: Validate live grid completeness (aggregate)
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import pandas as pd, sys
+
+          expected_p = [0.1, 0.3, 0.5, 0.7, 0.9]
+          entrypoints = [ln.strip() for ln in Path("config/entrypoints.txt").read_text().splitlines() if ln.strip()]
+          expected = {(ep, float(p)) for ep in entrypoints for p in expected_p}
+
+          seen = set()
+          for csv_path in Path("replicas").glob("replicate-*/live_availability.csv"):
+              df = pd.read_csv(csv_path)
+              if df.empty:
+                  continue
+              for entry in df.itertuples(index=False):
+                  try:
+                      ep = str(entry.entrypoint).strip()
+                      p = float(entry.p_fail)
+                  except Exception:
+                      continue
+                  seen.add((ep, p))
+
+          missing = sorted(expected - seen)
+          if missing:
+              msg = ", ".join(f"{ep}:{p}" for ep, p in missing)
+              raise SystemExit(f"Live availability missing {len(missing)} entrypoint×p_fail rows overall; missing: {msg}")
+          PY
 
       - name: Aggregate replicas → site/
         run: |

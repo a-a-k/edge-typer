@@ -73,7 +73,7 @@ edgetyper resilience --edges out/edges.parquet --pred out/pred_ours.csv --out ou
 edgetyper resilience --edges out/edges.parquet --pred out/pred_ours.csv --out out/availability_block.csv --assume-all-blocking 
 
 # 7) Live windows with Locust (fixed‑rate, multiple p_fail)
-#    For each p in 0.1 0.3 0.5 0.7 0.9: run Locust with --csv <prefix>, then post‑process:
+#    Repeat this block for each p in 0.1 0.3 0.5 0.7 0.9 (one Locust window per p_fail):
 python scripts/build_live_availability.py \
   --stats out/locust_0.3_stats.csv \
   --failures out/locust_0.3_failures.csv \
