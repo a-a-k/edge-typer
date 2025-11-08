@@ -132,6 +132,18 @@ jobs:
             loadgenerator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               command:
+                - --autostart
+                - --headless
+                - --users
+                - "50"
+                - --spawn-rate
+                - "5"
+                - --run-time
+                - "0"
+                - --stop-timeout
+                - "90"
+                - --host
+                - http://frontend:8080
                 - --csv
                 - /data/locust
                 - --csv-full-history
@@ -140,6 +152,18 @@ jobs:
             load-generator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               command:
+                - --autostart
+                - --headless
+                - --users
+                - "50"
+                - --spawn-rate
+                - "5"
+                - --run-time
+                - "0"
+                - --stop-timeout
+                - "90"
+                - --host
+                - http://frontend:8080
                 - --csv
                 - /data/locust
                 - --csv-full-history
