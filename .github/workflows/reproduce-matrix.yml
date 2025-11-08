@@ -247,31 +247,10 @@ jobs:
             --pred "${RUN_DIR}/pred_ours.csv" \
             --out "${RUN_DIR}/graph.json"
 
-          # Derive entrypoints from traces (no guessing)
-          python scripts/entrypoints_from_traces.py \
-            --spans "${RUN_DIR}/spans.parquet" \
-            --edges "${RUN_DIR}/edges.parquet" \
-            --out-csv "${RUN_DIR}/entrypoints.csv" \
-            --out-txt "${RUN_DIR}/entrypoints.txt" \
-            --out-targets "${RUN_DIR}/live_targets.yaml"
-          python - <<'PY'
-          import pandas as pd, os
-          from pathlib import Path
-          run = Path(os.environ["RUN_DIR"])
-          csv_path = run / "entrypoints.csv"
-          if not csv_path.exists() or csv_path.stat().st_size == 0:
-              raise SystemExit("entrypoints.csv was not created.")
-          df = pd.read_csv(csv_path)
-          col = "entrypoint" if "entrypoint" in df.columns else df.columns[0]
-          vals = [str(x).strip() for x in df[col].dropna().astype(str).tolist() if str(x).strip()]
-          if not vals:
-              raise SystemExit("entrypoints.csv has no entrypoint rows.")
-          txt = run / "entrypoints.txt"
-          targets = run / "live_targets.yaml"
-          if not targets.exists():
-              raise SystemExit("live_targets.yaml was not created.")
-          print(f"[entrypoints] derived {len(vals)} names from spans → {txt}")
-          PY
+          # Fixed entrypoints + live-target mapping for this experiment
+          cp config/entrypoints.csv "${RUN_DIR}/entrypoints.csv"
+          cp config/entrypoints.txt "${RUN_DIR}/entrypoints.txt"
+          cp config/live_targets.yaml "${RUN_DIR}/live_targets.yaml"
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
 
           # Audit: compare entrypoints vs edges.parquet services (first 5 present/missing)

@@ -6,7 +6,9 @@ This repository contains:
 
 * a CLI (`edgetyper`) that turns traces into a typed service graph, builds chaos plans, and runs a Monte‑Carlo availability estimator; 
 * an aggregator (`scripts/aggregate_replicas.py`) that merges per‑replica outputs into a static site;
-* an optional live pipeline that **post‑processes Locust CSV files** to compute live availability on the *same* grid (entrypoint × failure rate) as the model estimates, enabling a direct, apples‑to‑apples comparison.
+* a fixed live pipeline that **post‑processes Locust CSV files** to compute live availability on the *same* grid (entrypoint × failure rate) as the model estimates, enabling a direct, apples‑to‑apples comparison.
+
+> **Scope & reproducibility.** This repository is not a generic product. It is a reproducible experiment that targets the stock OpenTelemetry Demo workload (the Locust scenario shipped with `opentelemetry-demo`). Entry points are fixed ahead of time (`config/entrypoints.{txt,csv}`) and the Locust→service mapping is anchored in `config/live_targets.yaml`. The workflow never “guesses” entrypoints or routes; if those files do not match the workload, the run fails immediately.
 
 The availability estimator follows the **topological model** and **live success definition** described in the attached study:
 
@@ -72,12 +74,14 @@ edgetyper resilience --edges out/edges.parquet --pred out/pred_ours.csv --out ou
 
 # 7) Live windows with Locust (fixed‑rate, multiple p_fail)
 #    For each p in 0.1 0.3 0.5 0.7 0.9: run Locust with --csv <prefix>, then post‑process:
-edgetyper availability-live \
-  --locust-prefix out/locust_0.3 \
-  --targets out/live_targets.yaml \
-  --entrypoints out/entrypoints.txt \
-  --p-fail 0.3 \
-  --out out/live_availability.csv --append                  
+python scripts/build_live_availability.py \
+  --stats out/locust_0.3_stats.csv \
+  --failures out/locust_0.3_failures.csv \
+  --entrypoints config/entrypoints.csv \
+  --targets config/live_targets.yaml \
+  --replica replicate-001 \
+  --p-grid "0.1,0.3,0.5,0.7,0.9" \
+  --out out/live_availability.csv                 
 
 # 8) Aggregate one or more replicas into a site (availability‑only mode)
 python scripts/aggregate_replicas.py --replicas-dir runs --outdir site  # set AVAIL_ONLY=1 to hide rank/CI blocks
@@ -151,29 +155,23 @@ Post‑processes **Locust CSV** outputs into `live_availability.csv` using the *
 You do **not** need to modify `locustfile.py`. The flow is:
 
 1. For each (p_{\text{fail}}) in `{0.1,0.3,0.5,0.7,0.9}`, inject failures (kill a fraction of replicas) and run a **fixed‑rate** Locust window (`--csv <prefix>`, `--csv-full-history`, constant `-R`, fixed `-d`) as in the study. 
-2. Run `edgetyper availability-live` with:
+2. Post-process the resulting CSVs with:
 
-   * `--locust-prefix <prefix>` (reads `<prefix>_stats.csv` and `<prefix>_failures.csv`),
-   * `--targets live_targets.yaml` (maps Locust `Name` to entrypoint),
-   * `--entrypoints entrypoints.txt` (optional; keep model & live in sync),
-   * `--p-fail <value>`, `--out live_availability.csv --append`.
+   ```bash
+   python scripts/build_live_availability.py \
+     --stats       <prefix>_stats.csv \
+     --failures    <prefix>_failures.csv \
+     --entrypoints config/entrypoints.csv \
+     --targets     config/live_targets.yaml \
+     --replica     replicate-001 \
+     --p-grid      "0.1,0.3,0.5,0.7,0.9" \
+     --out         live_availability.csv
+   ```
 
-> **Want per-endpoint fidelity?** Run `scripts/entrypoints_from_traces.py --spans spans.parquet --edges edges.parquet --out-csv entrypoints.csv --out-txt entrypoints.txt --out-targets live_targets.yaml` to extract the entrypoint services straight from traces (root SERVER spans filtered against the actual graph). Then run `scripts/build_live_availability.py --stats <prefix>_stats.csv --failures <prefix>_failures.csv --entrypoints entrypoints.csv --targets live_targets.yaml --out live_availability.csv` to aggregate Locust metrics onto that same entrypoint set. Because both files come from the trace graph, the Monte-Carlo model and live data stay in lockstep. (The CLI `edgetyper availability-live` still exists for manual runs.)
-> Entries with fewer than 1 request in the Locust stats are skipped to avoid expecting live data that never arrives.
+> **Fixed entrypoints.** `config/entrypoints.{csv,txt}` and `config/live_targets.yaml` are the single source of truth for this experiment. Copy them into your run directory (the GitHub Actions workflow does this automatically) before running `edgetyper resilience` or `scripts/build_live_availability.py`. If you tweak the workload, edit these files manually and commit the change so the experiment stays reproducible.
+> Entries that never receive Locust requests will fail the live step; the workflow surfaces the missing `(entrypoint,p_fail)` pairs via `missing_live_entrypoints.txt`.
 
-> **Mapping guardrail.** `scripts/build_live_availability.py` now refuses to guess. Every entrypoint listed in `entrypoints.txt` must have an explicit regex in `live_targets.yaml`, otherwise the step fails with a list of unmapped Locust Names. Edit the generated stub to reflect your workload, or provide your own mapping file.
-
-**Example `live_targets.yaml`:**
-
-```yaml
-entrypoints:
-  frontend:
-    - name_regex: "^/$|^/api/.*"
-  payments:
-    - name_regex: "^/payments"
-```
-
-> **Note.** `src/edgetyper/targets.yaml` ships with a catch‑all mapping for the OpenTelemetry Demo. The CLI now warns when Locust requests fail to match your entrypoint rules (and errors if nothing matches), so you can adjust the YAML/filters before aggregating.
+The default `live_targets.yaml` intentionally routes **every** Locust Name to the `frontend` entrypoint (the only externally exposed service in the demo). If you introduce additional entrypoints, duplicate the block and provide tighter regexes.
 
 **What the command computes:** for each mapped entrypoint, it sums `#Requests` and categorizes failures from `_failures.csv` into **5xx**, **timeout**, **socket**. It writes one row per `(entrypoint, p_fail)` with:
 
