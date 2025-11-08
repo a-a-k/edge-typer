@@ -132,21 +132,29 @@ jobs:
             loadgenerator:
               image: ghcr.io/open-telemetry/demo-loadgenerator:latest
               command:
-                - --autostart
-                - --headless
-                - --users
-                - "50"
-                - --spawn-rate
-                - "5"
-                - --run-time
-                - "0"
-                - --stop-timeout
-                - "90"
-                - --host
-                - http://frontend:8080
-                - --csv
-                - /data/locust
-                - --csv-full-history
+                - /bin/sh
+                - -exc
+                - |
+                  p_fail="${P_FAIL}"
+                  window=${LOCUST_WINDOW:-180}
+                  failure_window=${FAILURE_WINDOW:-60}
+                  case "$p_fail" in
+                    0.1) chaos=("cartservice"); scale="0.9" ;;
+                    0.3) chaos=("cartservice"); scale="0.7" ;;
+                    0.5) chaos=("cartservice" "adservice"); scale="0.5" ;;
+                    0.7) chaos=("cartservice" "adservice" "checkoutservice"); scale="0.3" ;;
+                    0.9) chaos=("cartservice" "adservice" "checkoutservice" "frauddetectionservice"); scale="0.1" ;;
+                    *) chaos=("cartservice"); scale="1.0" ;;
+                  esac
+                  echo "[loadgenerator] P_FAIL=$p_fail scale=$scale chaos=${chaos[*]} window=$window failure_window=$failure_window"
+                  sleep 15
+                  for svc in "${chaos[@]}"; do
+                    docker compose -f /workspace/docker-compose.yml scale "$svc"="$scale" || true
+                  done
+                  locust --autostart --headless --users 50 --spawn-rate 5 --run-time "${window}s" --stop-timeout 90 --host http://frontend:8080 --csv /data/locust --csv-full-history
+                  for svc in "${chaos[@]}"; do
+                    docker compose -f /workspace/docker-compose.yml scale "$svc"=1 || true
+                  done
               volumes:
                 - "${RUN_DIR}:/data:rw"
             load-generator:

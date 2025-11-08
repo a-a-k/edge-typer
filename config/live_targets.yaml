@@ -1,3 +1,6 @@
 entrypoints:
   accounting:
-    - name_regex: ".*"
+    - name_regex: "^/api/product-ask-ai-assistant"
+  frontend:
+    - name_regex: "^/"
+    - name_regex: "^WebsiteBrowserUser\\."
