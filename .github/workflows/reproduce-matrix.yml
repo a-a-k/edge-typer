@@ -89,10 +89,15 @@ jobs:
           export COMPOSE_CMD
           echo "Using COMPOSE_CMD='${COMPOSE_CMD}'"
 
-          # 1) Get the OpenTelemetry Demo at a shallow depth (fast, deterministic)
+          # 1) Get the OpenTelemetry Demo at the fixed release v2.1.3 (deterministic)
           if [[ ! -d vendor/opentelemetry-demo ]]; then
-            git clone --depth=1 https://github.com/open-telemetry/opentelemetry-demo vendor/opentelemetry-demo
+            git clone https://github.com/open-telemetry/opentelemetry-demo vendor/opentelemetry-demo
           fi
+          cd vendor/opentelemetry-demo
+          git fetch --depth 1 origin refs/tags/2.1.3
+          git checkout --detach FETCH_HEAD
+          git submodule update --init --recursive
+          cd "${GITHUB_WORKSPACE}"
 
           # 2) Enable a file exporter in the demo's "extras" config so traces are written to /data/otel-traces.json
           EXTRAS="${DEMO_DIR}/src/otel-collector/otelcol-config-extras.yml"

@@ -1,3 +1,24 @@
 entrypoints:
+  accounting:
+    - name_regex: "^/api/product-ask-ai-assistant"
+  ad:
+    - name_regex: "^/api/data"
+  cart:
+    - name_regex: "^/api/cart"
+  flagd:
+    - name_regex: "^/api/flag"
   frontend:
-    - name_regex: ".*"
+    - name_regex: "^/$"
+    - name_regex: "^WebsiteBrowserUser\\."
+  frontend-proxy:
+    - name_regex: "^/frontend-proxy"
+  kafka:
+    - name_regex: "^/topics/"
+  load-generator:
+    - name_regex: "^/loadgenerator"
+  product-catalog:
+    - name_regex: "^/api/products"
+  product-reviews:
+    - name_regex: "^/api/product-reviews"
+  recommendation:
+    - name_regex: "^/api/recommendations"
