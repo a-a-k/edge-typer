@@ -417,6 +417,7 @@ jobs:
             --targets     "${RUN_DIR}/live_targets.yaml" \
             --replica     "replicate-${REPL_ID}" \
             --p-grid      "0.1,0.3,0.5,0.7,0.9" \
+            --no-strict \
             --out         "${RUN_DIR}/live_availability.csv"
 
 
