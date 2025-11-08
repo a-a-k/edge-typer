@@ -246,11 +246,16 @@ jobs:
             --pred "${RUN_DIR}/pred_ours.csv" \
             --out "${RUN_DIR}/graph.json"
 
-          # Freeze entrypoints directly from Locust stats for model/live parity
-          edgetyper entrypoints-from-locust \
-            --locust-prefix "${LOCUST_PREFIX}" \
+          # Derive entrypoints + live availability directly from Locust CSVs
+          python scripts/build_live_availability.py \
+            --stats "${LOCUST_STATS}" \
+            --failures "${LOCUST_FAILURES}" \
+            --replica "replicate-${REPL_ID}" \
             --min-requests 25 \
+            --p-grid "0.1,0.3,0.5,0.7,0.9" \
+            --out "${RUN_DIR}/live_availability.csv" \
             --out-entrypoints "${RUN_DIR}/entrypoints.csv" \
+            --out-entrypoints-txt "${RUN_DIR}/entrypoints.txt" \
             --out-targets "${RUN_DIR}/live_targets.yaml"
           python - <<'PY'
           import pandas as pd, os
@@ -265,8 +270,7 @@ jobs:
           if not vals:
               raise SystemExit("entrypoints.csv has no entrypoint rows.")
           txt = run / "entrypoints.txt"
-          txt.write_text("\n".join(vals) + "\n", encoding="utf-8")
-          print(f"[entrypoints] wrote {len(vals)} names to {txt}")
+          print(f"[entrypoints] verified {len(vals)} names in {txt}")
           PY
           echo "[entrypoints.csv]" && cat "${RUN_DIR}/entrypoints.csv"
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
@@ -415,27 +419,6 @@ jobs:
               print("[verify] WARNING: typed availability matches all-block nearly exactly (max diff < 1e-6).")
           PY
 
-      - name: Build live availability from Locust CSV (mandatory)
-        env:
-          LOCUST_STATS: ${{ env.LOCUST_STATS }}
-          LOCUST_FAILURES: ${{ env.LOCUST_FAILURES }}
-        run: |
-          set -euo pipefail
-          STATS="${LOCUST_STATS}"
-          if [[ -z "${STATS}" || ! -s "${STATS}" ]]; then
-            echo "::error ::[live] LOCUST_STATS is missing or empty. Ensure discovery step succeeded." >&2
-            exit 1
-          fi
-          FAILS="${LOCUST_FAILURES}"
-          echo "[live] Using stats=${STATS} failures=${FAILS}"
-          python scripts/build_live_availability.py \
-            --stats       "${STATS}" \
-            --failures    "${FAILS}" \
-            --typed       "${RUN_DIR}/availability_typed.csv" \
-            --replica     "replicate-${REPL_ID}" \
-            --targets     "${RUN_DIR}/live_targets.yaml" \
-            --entrypoints "${RUN_DIR}/entrypoints.csv" \
-            --out         "${RUN_DIR}/live_availability.csv"
 
       - name: Validate live vs model grids
         run: |
