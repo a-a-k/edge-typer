@@ -56,6 +56,7 @@ def _write_stub_targets(path: Path, entrypoints: Sequence[str]) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description="Extract entrypoint services from spans.parquet")
     ap.add_argument("--spans", type=Path, required=True, help="Path to spans.parquet")
+    ap.add_argument("--edges", type=Path, help="Optional edges.parquet to ensure entrypoints exist in the graph")
     ap.add_argument("--out-csv", type=Path, required=True, help="entrypoints.csv destination")
     ap.add_argument("--out-txt", type=Path, required=True, help="entrypoints.txt destination")
     ap.add_argument("--out-targets", type=Path, help="Optional stub live_targets.yaml destination")
@@ -82,6 +83,13 @@ def main() -> None:
     parent_service = servers["parent_span_id"].map(span_to_service)
     external_mask = servers["parent_span_id"].isna() | parent_service.isna()
     entry_services = sorted(set(servers.loc[external_mask, "service_name"]))
+    graph_services: set[str] | None = None
+    if args.edges and args.edges.exists():
+        edges = pd.read_parquet(args.edges)
+        cols = [c for c in ("src_service", "dst_service") if c in edges.columns]
+        if cols:
+            graph_services = set(pd.unique(edges[cols].values.ravel("K")))
+            entry_services = [svc for svc in entry_services if svc in graph_services]
     if not entry_services:
         raise SystemExit("[entrypoints-from-traces] no root SERVER spans detected; entrypoints set would be empty.")
 

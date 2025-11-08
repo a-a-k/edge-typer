@@ -250,6 +250,7 @@ jobs:
           # Derive entrypoints from traces (no guessing)
           python scripts/entrypoints_from_traces.py \
             --spans "${RUN_DIR}/spans.parquet" \
+            --edges "${RUN_DIR}/edges.parquet" \
             --out-csv "${RUN_DIR}/entrypoints.csv" \
             --out-txt "${RUN_DIR}/entrypoints.txt" \
             --out-targets "${RUN_DIR}/live_targets.yaml"
