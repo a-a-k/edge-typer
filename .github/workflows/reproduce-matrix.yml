@@ -247,16 +247,11 @@ jobs:
             --pred "${RUN_DIR}/pred_ours.csv" \
             --out "${RUN_DIR}/graph.json"
 
-          # Derive entrypoints + live availability directly from Locust CSVs
-          python scripts/build_live_availability.py \
-            --stats "${STATS}" \
-            --failures "${LOCUST_FAILURES}" \
-            --replica "replicate-${REPL_ID}" \
-            --min-requests 25 \
-            --p-grid "0.1,0.3,0.5,0.7,0.9" \
-            --out "${RUN_DIR}/live_availability.csv" \
-            --out-entrypoints "${RUN_DIR}/entrypoints.csv" \
-            --out-entrypoints-txt "${RUN_DIR}/entrypoints.txt" \
+          # Derive entrypoints from traces (no guessing)
+          python scripts/entrypoints_from_traces.py \
+            --spans "${RUN_DIR}/spans.parquet" \
+            --out-csv "${RUN_DIR}/entrypoints.csv" \
+            --out-txt "${RUN_DIR}/entrypoints.txt" \
             --out-targets "${RUN_DIR}/live_targets.yaml"
           python - <<'PY'
           import pandas as pd, os
@@ -271,9 +266,11 @@ jobs:
           if not vals:
               raise SystemExit("entrypoints.csv has no entrypoint rows.")
           txt = run / "entrypoints.txt"
-          print(f"[entrypoints] verified {len(vals)} names in {txt}")
+          targets = run / "live_targets.yaml"
+          if not targets.exists():
+              raise SystemExit("live_targets.yaml was not created.")
+          print(f"[entrypoints] derived {len(vals)} names from spans → {txt}")
           PY
-          echo "[entrypoints.csv]" && cat "${RUN_DIR}/entrypoints.csv"
           echo "[entrypoints.txt]" && cat "${RUN_DIR}/entrypoints.txt" || true
 
           # Audit: compare entrypoints vs edges.parquet services (first 5 present/missing)
@@ -419,6 +416,28 @@ jobs:
           if max_diff < 1e-6:
               print("[verify] WARNING: typed availability matches all-block nearly exactly (max diff < 1e-6).")
           PY
+
+      - name: Build live availability from Locust CSV (mandatory)
+        env:
+          LOCUST_STATS: ${{ env.LOCUST_STATS }}
+          LOCUST_FAILURES: ${{ env.LOCUST_FAILURES }}
+        run: |
+          set -euo pipefail
+          STATS="${LOCUST_STATS}"
+          if [[ -z "${STATS}" || ! -s "${STATS}" ]]; then
+            echo "::error ::[live] LOCUST_STATS is missing or empty. Ensure discovery step succeeded." >&2
+            exit 1
+          fi
+          FAILS="${LOCUST_FAILURES}"
+          echo "[live] Using stats=${STATS} failures=${FAILS}"
+          python scripts/build_live_availability.py \
+            --stats       "${STATS}" \
+            --failures    "${FAILS}" \
+            --entrypoints "${RUN_DIR}/entrypoints.csv" \
+            --targets     "${RUN_DIR}/live_targets.yaml" \
+            --replica     "replicate-${REPL_ID}" \
+            --p-grid      "0.1,0.3,0.5,0.7,0.9" \
+            --out         "${RUN_DIR}/live_availability.csv"
 
 
       - name: Validate live vs model grids

@@ -158,10 +158,10 @@ You do **not** need to modify `locustfile.py`. The flow is:
    * `--entrypoints entrypoints.txt` (optional; keep model & live in sync),
    * `--p-fail <value>`, `--out live_availability.csv --append`.
 
-> **Want per-endpoint fidelity?** Run `scripts/build_live_availability.py --stats <prefix>_stats.csv --failures <prefix>_failures.csv --out-entrypoints entrypoints.csv --out-entrypoints-txt entrypoints.txt --out-targets live_targets.yaml --out live_availability.csv`. The script derives entrypoints, writes the regex mapping, and emits live availability for the same set, so the Monte-Carlo model and Locust data stay aligned. (For ad-hoc use, `edgetyper entrypoints-from-locust` is still available.)
+> **Want per-endpoint fidelity?** Run `scripts/entrypoints_from_traces.py --spans spans.parquet --out-csv entrypoints.csv --out-txt entrypoints.txt --out-targets live_targets.yaml` to extract the entrypoint services straight from traces (SERVER spans without in-graph parents). Then run `scripts/build_live_availability.py --stats <prefix>_stats.csv --failures <prefix>_failures.csv --entrypoints entrypoints.csv --targets live_targets.yaml --out live_availability.csv` to aggregate Locust metrics onto that same entrypoint set. Because both files come from the trace graph, the Monte-Carlo model and live data stay in lockstep. (The CLI `edgetyper availability-live` still exists for manual runs.)
 > Entries with fewer than 1 request in the Locust stats are skipped to avoid expecting live data that never arrives.
 
-> **Sampling guardrail (CI).** In the matrix workflow we pass `--min-requests 25` to `scripts/build_live_availability.py` to drop endpoints that only ever see a handful of Locust calls; otherwise the validation step fails because there is no live signal to compare against. Adjust the threshold if your workload drives different traffic volumes.
+> **Mapping guardrail.** `scripts/build_live_availability.py` now refuses to guess. Every entrypoint listed in `entrypoints.txt` must have an explicit regex in `live_targets.yaml`, otherwise the step fails with a list of unmapped Locust Names. Edit the generated stub to reflect your workload, or provide your own mapping file.
 
 **Example `live_targets.yaml`:**
 

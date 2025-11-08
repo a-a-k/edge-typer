@@ -1725,13 +1725,21 @@ def resilience_cmd(edges_path: Path, pred_path: Path, replicas_path: Path | None
 
     # Filter to nodes present in the blocking graph
     services = set(adj.keys()) | {v for vs in adj.values() for v in vs}
-    eps_in = [e for e in entrypoints if e in services]
-    if not eps_in:
-        click.echo("[resilience] Provided entrypoints do not match the graph — guessing from graph indegree-0/top-degree", err=True)
-        entrypoints = guess_entrypoints(adj)
-        eps_in = [e for e in entrypoints if e in services]
+    if eps_path:
+        missing = sorted(e for e in entrypoints if e not in services)
+        if missing:
+            raise click.ClickException(
+                "[resilience] Entry points not present in the blocking graph: "
+                + ", ".join(missing)
+            )
+        entrypoints = [e for e in entrypoints if e in services]
     else:
-        entrypoints = eps_in
+        entrypoints = [e for e in entrypoints if e in services]
+    if not entrypoints:
+        raise click.ClickException(
+            "[resilience] No entrypoints remain after intersecting with the graph. "
+            "Ensure entrypoints.txt lists valid service names."
+        )
 
     # Visibility: log final entrypoints and first services from edges
     try:
