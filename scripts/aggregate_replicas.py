@@ -518,6 +518,8 @@ def main() -> None:
                                "MAE_block": overall_mae_b,
                                "win_rate_typed": winrate}]).to_csv(data_dir / "availability_errors_overall.csv", index=False)
                 errors_overall_exists = True
+            else:
+                raise SystemExit("Live availability detected but join with model rows was empty; check entrypoint alignment across replicas.")
 
                 download_links.extend([
                     '<li><a href="data/availability_join_pooled.csv" download>availability_join_pooled.csv</a></li>',
