@@ -173,6 +173,18 @@ You do **not** need to modify `locustfile.py`. The flow is:
 
 The default `live_targets.yaml` intentionally routes **every** Locust Name to the `frontend` entrypoint (the only externally exposed service in the demo). If you introduce additional entrypoints, duplicate the block and provide tighter regexes.
 
+---
+
+## Local three-stage workflow
+
+If you prefer to reproduce the pipeline locally (without GitHub Actions), run the helper scripts under `scripts/`:
+
+1. `./scripts/local_stage1_capture.sh` — clones the OpenTelemetry Demo (defaults to `v2.1.3`), enables the OTLP JSON exporter, runs the stack, and stores traces under `runs/capture/<timestamp>/collector/otel-traces.json`.
+2. `RUN_DIR=runs/capture/<ts> ./scripts/local_stage2_model.sh` — executes the EdgeTyper CLI end-to-end on the captured traces (graph, featurize, label, plan, Monte-Carlo typed/all-blocking).
+3. `./scripts/local_stage3_live.sh` — iterates through the default `p_fail` grid (`0.1..0.9`), injects faults, runs the load generator, and appends rows to `runs/live/<rate>/live_availability.csv`.
+
+Each script accepts environment overrides (see the header comments inside each file). Running the trio sequentially yields the same artifacts as the GitHub Actions matrix.
+
 **What the command computes:** for each mapped entrypoint, it sums `#Requests` and categorizes failures from `_failures.csv` into **5xx**, **timeout**, **socket**. It writes one row per `(entrypoint, p_fail)` with:
 
 ```
